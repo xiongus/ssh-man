@@ -1,0 +1,23 @@
+# Changelog
+
+# Changelog
+
+## 0.3.0
+
+- added `connect` to open a managed SSH host directly
+- added `tunnel` to start a managed tunnel directly
+- added `list --simple` for piping into tools like `fzf`
+- documented the one-time editable install workflow in the README
+
+## 0.2.0
+
+- added `bootstrap-key` to deploy a local public key to a remote host
+- added `onboard-host` to bootstrap key auth and write a managed host entry in one flow
+- added automatic SSH key creation when the local identity file is missing
+- documented onboarding and bootstrap workflows in the README
+
+## 0.1.0
+
+- created the initial `sshman` offline CLI
+- added `init`, `add-host`, `add-tunnel`, `list`, `show`, `check`, `backup`, and `import-csv`
+- added support for managed `~/.ssh/config` and `config.d` layout
