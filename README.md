@@ -9,6 +9,7 @@ Offline SSH config and tunnel manager for macOS/Linux terminals.
 - Adds SSH tunnel entries
 - Bootstraps SSH public-key auth for first-time server setup
 - Lets you connect to a managed host or start a managed tunnel directly
+- Supports common file copy and remote command workflows
 - Backs up managed config files before changes
 - Lists and shows managed entries
 - Runs basic checks for alias conflicts, ports, permissions, and agent status
@@ -54,6 +55,10 @@ sshman list
 sshman show s36
 sshman connect s36
 sshman tunnel t-s16-8001
+sshman copy-to s36 ./app.jar /root/app.jar
+sshman copy-from s36 /var/log/app.log ./app.log
+sshman exec s36 "hostname"
+sshman remove t-s16-8001
 sshman check
 ```
 
@@ -64,6 +69,13 @@ For shell pipelines or fuzzy pickers:
 ```bash
 sshman list --type host --simple
 sshman list --type tunnel --simple
+```
+
+For directories, `copy-to` and `copy-from` intentionally require `--recursive` so large transfers stay explicit:
+
+```bash
+sshman copy-to s36 ./dist /opt/app/dist --recursive
+sshman copy-from s36 /opt/app/logs ./logs --recursive
 ```
 
 First-time password-based onboarding:

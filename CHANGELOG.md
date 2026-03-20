@@ -2,6 +2,14 @@
 
 # Changelog
 
+## 0.5.0
+
+- added `copy-to` and `copy-from` for common `scp` workflows
+- added `exec` for one-off remote commands
+- added `remove` for deleting managed hosts or tunnels
+- made recursive directory copy explicit with `--recursive`
+- blocked host removal when tunnels still depend on that host
+
 ## 0.4.0
 
 - added `scripts/install.sh` for self-contained system-wide installation

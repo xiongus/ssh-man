@@ -125,6 +125,29 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_run_parser.add_argument("alias", nargs="?")
     tunnel_run_parser.set_defaults(func=cmd_tunnel)
 
+    copy_to_parser = subparsers.add_parser("copy-to", help="Copy a file or directory to a managed host.")
+    copy_to_parser.add_argument("alias")
+    copy_to_parser.add_argument("local_path")
+    copy_to_parser.add_argument("remote_path")
+    copy_to_parser.add_argument("-r", "--recursive", action="store_true", help="Copy directories recursively.")
+    copy_to_parser.set_defaults(func=cmd_copy_to)
+
+    copy_from_parser = subparsers.add_parser("copy-from", help="Copy a file or directory from a managed host.")
+    copy_from_parser.add_argument("alias")
+    copy_from_parser.add_argument("remote_path")
+    copy_from_parser.add_argument("local_path")
+    copy_from_parser.add_argument("-r", "--recursive", action="store_true", help="Copy directories recursively.")
+    copy_from_parser.set_defaults(func=cmd_copy_from)
+
+    exec_parser = subparsers.add_parser("exec", help="Run one command on a managed host.")
+    exec_parser.add_argument("alias")
+    exec_parser.add_argument("command")
+    exec_parser.set_defaults(func=cmd_exec)
+
+    remove_parser = subparsers.add_parser("remove", help="Remove a managed host or tunnel entry.")
+    remove_parser.add_argument("alias")
+    remove_parser.set_defaults(func=cmd_remove)
+
     check_parser = subparsers.add_parser("check", help="Run environment and config checks.")
     check_parser.set_defaults(func=cmd_check)
 
@@ -307,6 +330,62 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     if get_tunnel_by_alias(tunnels, alias) is None:
         raise SSHManError(f"Tunnel alias {alias!r} not found.")
     run_interactive_command(["ssh", "-N", alias])
+
+
+def cmd_copy_to(args: argparse.Namespace) -> None:
+    ensure_initialized()
+    hosts, _ = load_entries()
+    host = get_host_by_alias(hosts, args.alias)
+    if host is None:
+        raise SSHManError(f"Host alias {args.alias!r} not found.")
+    local_path = Path(args.local_path).expanduser()
+    if not local_path.exists():
+        raise SSHManError(f"Local path not found: {local_path}")
+    if local_path.is_dir() and not args.recursive:
+        raise SSHManError("Local path is a directory. Re-run with --recursive.")
+    run_interactive_command(build_scp_command(host, args.recursive, str(local_path), f"{args.alias}:{args.remote_path}"))
+
+
+def cmd_copy_from(args: argparse.Namespace) -> None:
+    ensure_initialized()
+    hosts, _ = load_entries()
+    host = get_host_by_alias(hosts, args.alias)
+    if host is None:
+        raise SSHManError(f"Host alias {args.alias!r} not found.")
+    local_target = Path(args.local_path).expanduser()
+    local_parent = local_target.parent if local_target.name else local_target
+    if not local_parent.exists():
+        raise SSHManError(f"Local destination directory does not exist: {local_parent}")
+    run_interactive_command(build_scp_command(host, args.recursive, f"{args.alias}:{args.remote_path}", str(local_target)))
+
+
+def cmd_exec(args: argparse.Namespace) -> None:
+    ensure_initialized()
+    hosts, _ = load_entries()
+    if get_host_by_alias(hosts, args.alias) is None:
+        raise SSHManError(f"Host alias {args.alias!r} not found.")
+    run_interactive_command(["ssh", args.alias, args.command])
+
+
+def cmd_remove(args: argparse.Namespace) -> None:
+    ensure_initialized()
+    hosts, tunnels = load_entries()
+    host = get_host_by_alias(hosts, args.alias)
+    if host is not None:
+        dependent_tunnels = [tunnel.alias for tunnel in tunnels if tunnel.via == args.alias]
+        if dependent_tunnels:
+            raise SSHManError(
+                "Cannot remove host with dependent tunnels: " + ", ".join(dependent_tunnels)
+            )
+        remove_entry_from_file(HOSTS_PATH, args.alias)
+        print(f"Removed host {args.alias}")
+        return
+    tunnel = get_tunnel_by_alias(tunnels, args.alias)
+    if tunnel is not None:
+        remove_entry_from_file(TUNNELS_PATH, args.alias)
+        print(f"Removed tunnel {args.alias}")
+        return
+    raise SSHManError(f"Alias {args.alias!r} not found.")
 
 
 def cmd_check(args: argparse.Namespace) -> None:
@@ -660,6 +739,28 @@ def append_entry(path: Path, block: str) -> None:
         handle.write(block)
 
 
+def remove_entry_from_file(path: Path, alias: str) -> None:
+    backup_paths()
+    blocks = split_config_blocks(path)
+    kept: list[tuple[list[str], list[str]]] = []
+    removed = False
+    for comments, lines in blocks:
+        if lines and lines[0].startswith("Host ") and lines[0].split(maxsplit=1)[1].strip() == alias:
+            removed = True
+            continue
+        kept.append((comments, lines))
+    if not removed:
+        raise SSHManError(f"Alias {alias!r} not found in {path}.")
+    content = MANAGED_HEADER
+    for comments, lines in kept:
+        if comments:
+            content += "\n".join(comments) + "\n"
+        if lines:
+            content += "\n".join(lines) + "\n"
+        content += "\n"
+    write_file(path, content.rstrip() + "\n")
+
+
 def parse_metadata_comments(comments: Iterable[str]) -> dict[str, str]:
     for comment in comments:
         stripped = comment.strip()
@@ -697,6 +798,20 @@ def get_tunnel_by_alias(tunnels: Iterable[TunnelEntry], alias: str) -> TunnelEnt
         if tunnel.alias == alias:
             return tunnel
     return None
+
+
+def build_scp_command(host: HostEntry, recursive: bool, source: str, destination: str) -> list[str]:
+    command = ["scp"]
+    if recursive:
+        command.append("-r")
+    if host.port != 22:
+        command.extend(["-P", str(host.port)])
+    if host.identity_file:
+        command.extend(["-i", os.path.expanduser(host.identity_file)])
+    if host.proxy_jump:
+        command.extend(["-o", f"ProxyJump={host.proxy_jump}"])
+    command.extend([source, destination])
+    return command
 
 
 def ensure_unique_alias(alias: str, hosts: Iterable[HostEntry], tunnels: Iterable[TunnelEntry]) -> None:
@@ -879,6 +994,29 @@ def choose_alias(entries: Iterable[HostEntry | TunnelEntry], entry_type: str) ->
     if index < 1 or index > len(items):
         raise SSHManError(f"{entry_type.capitalize()} selection out of range.")
     return items[index - 1].alias
+
+
+def split_config_blocks(path: Path) -> list[tuple[list[str], list[str]]]:
+    if not path.exists():
+        return []
+    blocks: list[tuple[list[str], list[str]]] = []
+    current: list[str] = []
+    comments: list[str] = []
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            if current:
+                blocks.append((comments, current))
+                current = []
+                comments = []
+            continue
+        if line.startswith("#"):
+            comments.append(line)
+            continue
+        current.append(line)
+    if current:
+        blocks.append((comments, current))
+    return blocks
 
 
 if __name__ == "__main__":
