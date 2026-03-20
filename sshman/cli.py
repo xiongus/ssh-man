@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import re
 import shlex
@@ -9,10 +8,12 @@ import shutil
 import socket
 import subprocess
 import sys
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+
+from sshman.inventory import InventoryError, load_inventory, write_template
+from sshman.models import HostEntry, InventoryHost, InventoryTunnel, TunnelEntry
 
 
 SSH_DIR = Path.home() / ".ssh"
@@ -30,29 +31,6 @@ class SSHManError(Exception):
     pass
 
 
-@dataclass
-class HostEntry:
-    alias: str
-    hostname: str
-    user: str
-    port: int = 22
-    group: str = "default"
-    identity_file: str | None = None
-    note: str | None = None
-    proxy_jump: str | None = None
-
-
-@dataclass
-class TunnelEntry:
-    alias: str
-    via: str
-    local_port: int
-    target_host: str
-    target_port: int
-    bind_address: str = "127.0.0.1"
-    note: str | None = None
-
-
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -62,6 +40,9 @@ def main() -> None:
             parser.print_help()
             return
         args.func(args)
+    except InventoryError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except SSHManError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -162,8 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     backup_parser = subparsers.add_parser("backup", help="Create a timestamped ~/.ssh backup.")
     backup_parser.set_defaults(func=cmd_backup)
 
-    import_parser = subparsers.add_parser("import-csv", help="Import hosts or tunnels from CSV.")
-    import_parser.add_argument("--type", required=True, choices=("host", "tunnel"))
+    import_parser = subparsers.add_parser("import", help="Import hosts and tunnels from YAML inventory.")
     import_parser.add_argument("--file", required=True)
     import_parser.add_argument(
         "--on-conflict",
@@ -171,7 +151,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="error",
         help="How to handle existing aliases during import.",
     )
-    import_parser.set_defaults(func=cmd_import_csv)
+    import_parser.add_argument(
+        "--use-passwords",
+        action="store_true",
+        help="Use password fields from inventory for one-time key bootstrap when present.",
+    )
+    import_parser.set_defaults(func=cmd_import_inventory)
+
+    template_parser = subparsers.add_parser("template", help="Write or print the YAML inventory template.")
+    template_parser.add_argument("--file", help="Write the template to a file instead of stdout.")
+    template_parser.set_defaults(func=cmd_template)
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap-key",
@@ -459,67 +448,53 @@ def cmd_backup(args: argparse.Namespace) -> None:
     print(f"Backup created at {backup_dir}")
 
 
-def cmd_import_csv(args: argparse.Namespace) -> None:
+def cmd_import_inventory(args: argparse.Namespace) -> None:
     ensure_initialized()
     path = Path(args.file).expanduser()
     if not path.exists():
-        raise SSHManError(f"CSV file not found: {path}")
+        raise SSHManError(f"Inventory file not found: {path}")
 
-    with path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        rows = list(reader)
-
-    if not rows:
-        print("No rows imported.")
+    inventory_hosts = load_inventory(path)
+    if not inventory_hosts:
+        print("No hosts imported.")
         return
 
-    imported = 0
+    imported_hosts = 0
+    imported_tunnels = 0
     skipped = 0
     updated = 0
-    for row in rows:
-        row = {key: (value or "").strip() for key, value in row.items()}
-        alias = row["alias"]
-        hosts, tunnels = load_entries()
-        exists = get_host_by_alias(hosts, alias) if args.type == "host" else get_tunnel_by_alias(tunnels, alias)
-        if exists is not None:
-            if args.on_conflict == "error":
-                raise SSHManError(f"Alias {alias!r} already exists.")
-            if args.on_conflict == "skip":
-                skipped += 1
-                continue
-            if args.on_conflict == "update":
-                cmd_remove(argparse.Namespace(alias=alias))
-                updated += 1
 
-        if args.type == "host":
-            namespace = argparse.Namespace(
-                alias=alias,
-                host=row["host"],
-                user=row["user"],
-                port=int(row["port"] or 22),
-                group=row.get("group") or "default",
-                identity_file=row.get("identity_file") or None,
-                note=row.get("note") or None,
-                proxy_jump=row.get("proxy_jump") or None,
+    for inventory_host in inventory_hosts:
+        host_state = apply_host_inventory(inventory_host, args.on_conflict, args.use_passwords)
+        imported_hosts += host_state["imported"]
+        skipped += host_state["skipped"]
+        updated += host_state["updated"]
+
+        for inventory_tunnel in inventory_host.tunnels:
+            tunnel_state = apply_tunnel_inventory(
+                via_alias=inventory_host.alias,
+                inventory_tunnel=inventory_tunnel,
+                on_conflict=args.on_conflict,
             )
-            cmd_add_host(namespace)
-        else:
-            namespace = argparse.Namespace(
-                alias=alias,
-                via=row["via"],
-                local_port=int(row["local_port"]),
-                target_host=row["target_host"],
-                target_port=int(row["target_port"]),
-                bind_address=row.get("bind_address") or "127.0.0.1",
-                note=row.get("note") or None,
-            )
-            cmd_add_tunnel(namespace)
-        imported += 1
-    print(f"Imported {imported} {args.type} entries from {path}")
+            imported_tunnels += tunnel_state["imported"]
+            skipped += tunnel_state["skipped"]
+            updated += tunnel_state["updated"]
+
+    print(f"Imported hosts: {imported_hosts}")
+    print(f"Imported tunnels: {imported_tunnels}")
     if updated:
         print(f"Updated existing entries: {updated}")
     if skipped:
         print(f"Skipped existing entries: {skipped}")
+
+
+def cmd_template(args: argparse.Namespace) -> None:
+    if args.file:
+        destination = Path(args.file).expanduser()
+        write_template(destination)
+        print(f"Wrote template to {destination}")
+        return
+    print(write_template())
 
 
 def cmd_bootstrap_key(args: argparse.Namespace) -> None:
@@ -590,6 +565,93 @@ def cmd_onboard_host(args: argparse.Namespace) -> None:
     append_entry(HOSTS_PATH, render_host_entry(entry))
     print(f"Onboarded host {entry.alias}")
     maybe_validate_alias(entry.alias)
+
+
+def apply_host_inventory(inventory_host: InventoryHost, on_conflict: str, use_passwords: bool) -> dict[str, int]:
+    hosts, tunnels = load_entries()
+    existing_host = get_host_by_alias(hosts, inventory_host.alias)
+    if existing_host is not None:
+        if on_conflict == "error":
+            raise SSHManError(f"Alias {inventory_host.alias!r} already exists.")
+        if on_conflict == "skip":
+            return {"imported": 0, "skipped": 1, "updated": 0}
+        if on_conflict == "update":
+            dependent_tunnels = [tunnel.alias for tunnel in tunnels if tunnel.via == inventory_host.alias]
+            if dependent_tunnels:
+                rewrite_tunnels_file([t for t in tunnels if t.alias not in dependent_tunnels], hosts)
+            hosts = [host for host in hosts if host.alias != inventory_host.alias]
+            rewrite_hosts_file(hosts)
+            existing_host = None
+            updated = 1
+        else:
+            updated = 0
+    else:
+        updated = 0
+
+    if use_passwords and inventory_host.password:
+        identity_file = inventory_host.identity_file or DEFAULT_IDENTITY
+        identity_path = ensure_local_key(identity_file, None)
+        public_key_path = public_key_for(identity_path)
+        deploy_public_key(
+            hostname=inventory_host.host,
+            user=inventory_host.user,
+            port=inventory_host.port,
+            public_key_path=public_key_path,
+            proxy_jump=inventory_host.proxy_jump,
+            password=inventory_host.password,
+        )
+        verify_key_login(
+            hostname=inventory_host.host,
+            user=inventory_host.user,
+            port=inventory_host.port,
+            identity_file=identity_path,
+            proxy_jump=inventory_host.proxy_jump,
+        )
+
+    cmd_add_host(
+        argparse.Namespace(
+            alias=inventory_host.alias,
+            host=inventory_host.host,
+            user=inventory_host.user,
+            port=inventory_host.port,
+            group=inventory_host.group,
+            identity_file=inventory_host.identity_file,
+            note=inventory_host.note,
+            proxy_jump=inventory_host.proxy_jump,
+        )
+    )
+    return {"imported": 1, "skipped": 0, "updated": updated}
+
+
+def apply_tunnel_inventory(via_alias: str, inventory_tunnel: InventoryTunnel, on_conflict: str) -> dict[str, int]:
+    hosts, tunnels = load_entries()
+    existing_tunnel = get_tunnel_by_alias(tunnels, inventory_tunnel.alias)
+    if existing_tunnel is not None:
+        if on_conflict == "error":
+            raise SSHManError(f"Alias {inventory_tunnel.alias!r} already exists.")
+        if on_conflict == "skip":
+            return {"imported": 0, "skipped": 1, "updated": 0}
+        if on_conflict == "update":
+            tunnels = [tunnel for tunnel in tunnels if tunnel.alias != inventory_tunnel.alias]
+            rewrite_tunnels_file(tunnels, hosts)
+            updated = 1
+        else:
+            updated = 0
+    else:
+        updated = 0
+
+    cmd_add_tunnel(
+        argparse.Namespace(
+            alias=inventory_tunnel.alias,
+            via=via_alias,
+            local_port=inventory_tunnel.local_port,
+            target_host=inventory_tunnel.target_host,
+            target_port=inventory_tunnel.target_port,
+            bind_address=inventory_tunnel.bind_address,
+            note=inventory_tunnel.note,
+        )
+    )
+    return {"imported": 1, "skipped": 0, "updated": updated}
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -978,7 +1040,7 @@ def maybe_validate_alias(alias: str) -> None:
 
 def ensure_local_key(identity_file: str, comment: str | None) -> Path:
     identity_path = Path(os.path.expanduser(identity_file))
-    public_key_path = identity_path.with_suffix(identity_path.suffix + ".pub") if identity_path.suffix else Path(f"{identity_path}.pub")
+    public_key_path = public_key_for(identity_path)
     if identity_path.exists() and public_key_path.exists():
         return identity_path
 
@@ -994,6 +1056,10 @@ def ensure_local_key(identity_file: str, comment: str | None) -> Path:
     return identity_path
 
 
+def public_key_for(identity_path: Path) -> Path:
+    return identity_path.with_suffix(identity_path.suffix + ".pub") if identity_path.suffix else Path(f"{identity_path}.pub")
+
+
 def default_key_comment() -> str:
     username = os.environ.get("USER") or "user"
     hostname = socket.gethostname()
@@ -1007,6 +1073,7 @@ def deploy_public_key(
     port: int,
     public_key_path: Path,
     proxy_jump: str | None,
+    password: str | None = None,
 ) -> None:
     ssh_copy_id = shutil.which("ssh-copy-id")
     if ssh_copy_id:
@@ -1014,6 +1081,8 @@ def deploy_public_key(
         if proxy_jump:
             command.extend(["-o", f"ProxyJump={proxy_jump}"])
         command.append(f"{user}@{hostname}")
+        if password:
+            command = with_sshpass(command, password)
         result = subprocess.run(command, check=False)
         if result.returncode != 0:
             raise SSHManError("ssh-copy-id failed while deploying the public key.")
@@ -1027,9 +1096,21 @@ def deploy_public_key(
     command.append("umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && grep -qxF \"$KEY\" ~/.ssh/authorized_keys || echo \"$KEY\" >> ~/.ssh/authorized_keys")
     env = os.environ.copy()
     env["KEY"] = public_key
+    if password:
+        command = with_sshpass(command, password)
     result = subprocess.run(command, env=env, check=False)
     if result.returncode != 0:
         raise SSHManError("ssh fallback failed while deploying the public key.")
+
+
+def with_sshpass(command: list[str], password: str) -> list[str]:
+    sshpass = shutil.which("sshpass")
+    if not sshpass:
+        raise SSHManError(
+            "Inventory requested password-based bootstrap, but sshpass is not installed. "
+            "Install sshpass or omit the password field."
+        )
+    return [sshpass, "-p", password, *command]
 
 
 def verify_key_login(

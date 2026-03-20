@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- replaced CSV import with a single YAML inventory import flow
+- added `template` to generate the recommended inventory file
+- added optional password fields for one-time bootstrap during YAML import
+- refactored inventory models into dedicated modules
+
 ## 0.6.0
 
 - added `rename` for managed host and tunnel aliases

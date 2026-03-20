@@ -14,7 +14,7 @@ Offline SSH config and tunnel manager for macOS/Linux terminals.
 - Backs up managed config files before changes
 - Lists and shows managed entries
 - Runs basic checks for alias conflicts, ports, permissions, and agent status
-- Imports hosts or tunnels from CSV
+- Imports hosts and tunnels from a single YAML inventory
 
 ## What it does not do
 
@@ -50,6 +50,7 @@ python3 -m pip install -e .
 
 ```bash
 sshman init
+sshman template --file inventory.yaml
 sshman add-host --alias s36 --host 192.168.78.36 --user root --note "Primary jump box"
 sshman add-tunnel --alias t-s16-8001 --via s36 --local-port 18001 --target-host 100.124.241.16 --target-port 8001
 sshman list
@@ -62,6 +63,7 @@ sshman exec s36 "hostname"
 sshman rename s36 jump-box
 sshman remove t-s16-8001
 sshman doctor
+sshman import --file inventory.yaml --on-conflict update
 sshman check
 ```
 
@@ -108,26 +110,28 @@ python3 -m sshman.cli --help
 
 The editable install is best for development. If you want a self-contained machine install, use `./scripts/install.sh` instead.
 
-## CSV import
+## Inventory import
 
-Host CSV headers:
+`sshman` now supports one import format only: YAML inventory.
 
-```csv
-alias,host,user,port,group,identity_file,note,proxy_jump
-```
-
-Tunnel CSV headers:
-
-```csv
-alias,via,local_port,target_host,target_port,bind_address,note
-```
-
-Import conflict handling:
+Write a starter inventory:
 
 ```bash
-sshman import-csv --type host --file hosts.csv --on-conflict error
-sshman import-csv --type host --file hosts.csv --on-conflict skip
-sshman import-csv --type host --file hosts.csv --on-conflict update
+sshman template --file inventory.yaml
+```
+
+Import it:
+
+```bash
+sshman import --file inventory.yaml --on-conflict error
+sshman import --file inventory.yaml --on-conflict skip
+sshman import --file inventory.yaml --on-conflict update
+```
+
+If you choose to keep passwords in the inventory for first-time bootstrap only:
+
+```bash
+sshman import --file inventory.yaml --on-conflict update --use-passwords
 ```
 
 Rename existing aliases:
@@ -147,3 +151,4 @@ sshman doctor
 - `onboard-host` and `bootstrap-key` use `ssh-copy-id` if available
 - without `ssh-copy-id`, `sshman` falls back to native `ssh`
 - passwords are used only for the bootstrap session and are not stored
+- password fields inside YAML inventory are optional and only used when `--use-passwords` is passed
