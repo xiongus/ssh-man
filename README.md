@@ -1,26 +1,20 @@
 # sshman
 
-Offline SSH config and tunnel manager for macOS/Linux terminals.
+Offline SSH inventory manager for macOS/Linux terminals.
 
 ## What it does
 
-- Initializes a clean `~/.ssh/config` layout with `config.d`
-- Adds SSH host entries
-- Adds SSH tunnel entries
-- Bootstraps SSH public-key auth for first-time server setup
-- Lets you connect to a managed host or start a managed tunnel directly
-- Supports common file copy and remote command workflows
-- Supports maintenance workflows like rename, diagnostics, and incremental CSV import
-- Backs up managed config files before changes
-- Lists and shows managed entries
-- Runs basic checks for alias conflicts, ports, permissions, and agent status
-- Imports hosts and tunnels from a single YAML inventory
+- imports hosts and tunnels from one YAML inventory
+- generates a starter inventory template
+- connects to managed hosts and tunnels
+- supports copy, exec, rename, remove, and doctor workflows
+- can optionally use password fields once during import for key bootstrap
 
 ## What it does not do
 
-- It does not replace `ssh`
-- It does not store server passwords
-- It is designed around native `ssh`, SSH keys, and macOS Keychain
+- it does not replace `ssh`
+- it does not store passwords outside the inventory file
+- it does not aim to be a full terminal or deployment platform
 
 ## Install
 
@@ -31,40 +25,24 @@ cd /Users/xiongus/Documents/initiate
 sudo ./scripts/install.sh
 ```
 
-This copies `sshman` into a fixed system location and creates `/usr/local/bin/sshman`, so the source checkout is no longer required after install.
-
 Remove it later with:
 
 ```bash
 sudo ./scripts/uninstall.sh
 ```
 
-Editable local development install:
+## Golden Path
 
 ```bash
-cd /Users/xiongus/Documents/initiate
-python3 -m pip install -e .
-```
-
-## Usage
-
-```bash
-sshman init
 sshman template --file inventory.yaml
-sshman add-host --alias s36 --host 192.168.78.36 --user root --note "Primary jump box"
-sshman add-tunnel --alias t-s16-8001 --via s36 --local-port 18001 --target-host 100.124.241.16 --target-port 8001
-sshman list
-sshman show s36
-sshman connect s36
-sshman tunnel t-s16-8001
-sshman copy-to s36 ./app.jar /root/app.jar
-sshman copy-from s36 /var/log/app.log ./app.log
-sshman exec s36 "hostname"
-sshman rename s36 jump-box
-sshman remove t-s16-8001
-sshman doctor
 sshman import --file inventory.yaml --on-conflict update
-sshman check
+sshman list
+sshman connect jump-box
+sshman tunnel t-s16-8001
+sshman copy jump-box ./app.jar :/root/app.jar
+sshman copy jump-box :/var/log/app.log ./app.log
+sshman exec jump-box "hostname"
+sshman doctor
 ```
 
 If you omit the alias, `sshman connect` and `sshman tunnel` can prompt you to choose from the saved list.
@@ -76,43 +54,16 @@ sshman list --type host --simple
 sshman list --type tunnel --simple
 ```
 
-For directories, `copy-to` and `copy-from` intentionally require `--recursive` so large transfers stay explicit:
+For directories, use `--recursive` explicitly:
 
 ```bash
-sshman copy-to s36 ./dist /opt/app/dist --recursive
-sshman copy-from s36 /opt/app/logs ./logs --recursive
+sshman copy jump-box ./dist :/opt/app/dist --recursive
+sshman copy jump-box :/opt/app/logs ./logs --recursive
 ```
 
-First-time password-based onboarding:
+## Inventory
 
-```bash
-sshman onboard-host --alias s36 --host 192.168.78.36 --user root --note "Primary jump box"
-```
-
-For an existing host you just want to convert to key-based login:
-
-```bash
-sshman bootstrap-key --alias s36 --host 192.168.78.36 --user root
-```
-
-These commands will:
-
-- create `~/.ssh/id_ed25519` if missing
-- prompt you once through `ssh-copy-id` or native `ssh`
-- verify that key-based login now works
-- keep server passwords out of local config files
-
-You can also run it without installing the console script:
-
-```bash
-python3 -m sshman.cli --help
-```
-
-The editable install is best for development. If you want a self-contained machine install, use `./scripts/install.sh` instead.
-
-## Inventory import
-
-`sshman` now supports one import format only: YAML inventory.
+`sshman` supports one import format only: YAML.
 
 Write a starter inventory:
 
@@ -134,21 +85,30 @@ If you choose to keep passwords in the inventory for first-time bootstrap only:
 sshman import --file inventory.yaml --on-conflict update --use-passwords
 ```
 
-Rename existing aliases:
+Minimal example:
 
-```bash
-sshman rename old-alias new-alias
-```
-
-Run richer diagnostics:
-
-```bash
-sshman doctor
+```yaml
+hosts:
+  - alias: jump-box
+    host: 192.168.78.36
+    user: root
+    port: 22
+    group: default
+    note: Primary jump host
+    proxy_jump:
+    identity_file: ~/.ssh/id_ed25519
+    password:
+    tunnels:
+      - alias: t-s16-8001
+        local_port: 18001
+        target_host: 100.124.241.16
+        target_port: 8001
+        bind_address: 127.0.0.1
+        note: Service tunnel
 ```
 
 ## Notes
 
-- `onboard-host` and `bootstrap-key` use `ssh-copy-id` if available
-- without `ssh-copy-id`, `sshman` falls back to native `ssh`
-- passwords are used only for the bootstrap session and are not stored
-- password fields inside YAML inventory are optional and only used when `--use-passwords` is passed
+- password fields are optional and only used when `--use-passwords` is passed
+- if passwords are present and you use `--use-passwords`, `sshpass` must be installed
+- editable local development is still possible with `python3 -m pip install -e .`

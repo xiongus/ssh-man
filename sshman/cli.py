@@ -55,31 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="Initialize ~/.ssh/config structure.")
-    init_parser.add_argument("--force", action="store_true", help="Overwrite managed files.")
-    init_parser.set_defaults(func=cmd_init)
-
-    host_parser = subparsers.add_parser("add-host", help="Add a host entry.")
-    host_parser.add_argument("--alias", required=True)
-    host_parser.add_argument("--host", required=True)
-    host_parser.add_argument("--user", required=True)
-    host_parser.add_argument("--port", type=int, default=22)
-    host_parser.add_argument("--group", default="default")
-    host_parser.add_argument("--identity-file")
-    host_parser.add_argument("--note")
-    host_parser.add_argument("--proxy-jump")
-    host_parser.set_defaults(func=cmd_add_host)
-
-    tunnel_parser = subparsers.add_parser("add-tunnel", help="Add a tunnel entry.")
-    tunnel_parser.add_argument("--alias", required=True)
-    tunnel_parser.add_argument("--via", required=True, help="Existing SSH host alias.")
-    tunnel_parser.add_argument("--local-port", required=True, type=int)
-    tunnel_parser.add_argument("--target-host", required=True)
-    tunnel_parser.add_argument("--target-port", required=True, type=int)
-    tunnel_parser.add_argument("--bind-address", default="127.0.0.1")
-    tunnel_parser.add_argument("--note")
-    tunnel_parser.set_defaults(func=cmd_add_tunnel)
-
     list_parser = subparsers.add_parser("list", help="List managed entries.")
     list_parser.add_argument(
         "--type",
@@ -94,10 +69,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_parser.set_defaults(func=cmd_list)
 
-    show_parser = subparsers.add_parser("show", help="Show one entry and usage.")
-    show_parser.add_argument("alias")
-    show_parser.set_defaults(func=cmd_show)
-
     connect_parser = subparsers.add_parser("connect", help="Connect to a managed host.")
     connect_parser.add_argument("alias", nargs="?")
     connect_parser.set_defaults(func=cmd_connect)
@@ -106,19 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_run_parser.add_argument("alias", nargs="?")
     tunnel_run_parser.set_defaults(func=cmd_tunnel)
 
-    copy_to_parser = subparsers.add_parser("copy-to", help="Copy a file or directory to a managed host.")
-    copy_to_parser.add_argument("alias")
-    copy_to_parser.add_argument("local_path")
-    copy_to_parser.add_argument("remote_path")
-    copy_to_parser.add_argument("-r", "--recursive", action="store_true", help="Copy directories recursively.")
-    copy_to_parser.set_defaults(func=cmd_copy_to)
-
-    copy_from_parser = subparsers.add_parser("copy-from", help="Copy a file or directory from a managed host.")
-    copy_from_parser.add_argument("alias")
-    copy_from_parser.add_argument("remote_path")
-    copy_from_parser.add_argument("local_path")
-    copy_from_parser.add_argument("-r", "--recursive", action="store_true", help="Copy directories recursively.")
-    copy_from_parser.set_defaults(func=cmd_copy_from)
+    copy_parser = subparsers.add_parser("copy", help="Copy files to or from a managed host.")
+    copy_parser.add_argument("alias")
+    copy_parser.add_argument("source")
+    copy_parser.add_argument("destination")
+    copy_parser.add_argument("-r", "--recursive", action="store_true", help="Copy directories recursively.")
+    copy_parser.set_defaults(func=cmd_copy)
 
     exec_parser = subparsers.add_parser("exec", help="Run one command on a managed host.")
     exec_parser.add_argument("alias")
@@ -134,14 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     remove_parser.add_argument("alias")
     remove_parser.set_defaults(func=cmd_remove)
 
-    check_parser = subparsers.add_parser("check", help="Run environment and config checks.")
-    check_parser.set_defaults(func=cmd_check)
-
-    doctor_parser = subparsers.add_parser("doctor", help="Run richer SSH environment diagnostics.")
+    doctor_parser = subparsers.add_parser("doctor", help="Run SSH environment diagnostics.")
     doctor_parser.set_defaults(func=cmd_doctor)
-
-    backup_parser = subparsers.add_parser("backup", help="Create a timestamped ~/.ssh backup.")
-    backup_parser.set_defaults(func=cmd_backup)
 
     import_parser = subparsers.add_parser("import", help="Import hosts and tunnels from YAML inventory.")
     import_parser.add_argument("--file", required=True)
@@ -162,56 +120,20 @@ def build_parser() -> argparse.ArgumentParser:
     template_parser.add_argument("--file", help="Write the template to a file instead of stdout.")
     template_parser.set_defaults(func=cmd_template)
 
-    bootstrap_parser = subparsers.add_parser(
-        "bootstrap-key",
-        help="Deploy your public key to a remote host for passwordless SSH.",
-    )
-    add_connection_args(bootstrap_parser)
-    bootstrap_parser.add_argument(
-        "--identity-file",
-        default=DEFAULT_IDENTITY,
-        help="Private key path to use or create if missing.",
-    )
-    bootstrap_parser.add_argument(
-        "--comment",
-        help="SSH key comment when generating a new key.",
-    )
-    bootstrap_parser.set_defaults(func=cmd_bootstrap_key)
-
-    onboard_parser = subparsers.add_parser(
-        "onboard-host",
-        help="Bootstrap key auth and then add a managed host entry.",
-    )
-    add_connection_args(onboard_parser)
-    onboard_parser.add_argument("--group", default="default")
-    onboard_parser.add_argument("--identity-file", default=DEFAULT_IDENTITY)
-    onboard_parser.add_argument("--comment")
-    onboard_parser.add_argument("--note")
-    onboard_parser.add_argument("--proxy-jump")
-    onboard_parser.set_defaults(func=cmd_onboard_host)
-
     return parser
 
 
-def add_connection_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--alias", required=True)
-    parser.add_argument("--host", required=True)
-    parser.add_argument("--user", required=True)
-    parser.add_argument("--port", type=int, default=22)
-
-
-def cmd_init(args: argparse.Namespace) -> None:
+def init_config(force: bool = False) -> None:
     ensure_ssh_dirs()
-    if CONFIG_PATH.exists() and not args.force and "Managed by sshman" not in CONFIG_PATH.read_text():
+    if CONFIG_PATH.exists() and not force and "Managed by sshman" not in CONFIG_PATH.read_text():
         raise SSHManError(
             f"{CONFIG_PATH} already exists and is not managed by sshman. Back it up or pass --force."
         )
 
     write_file(CONFIG_PATH, render_main_config())
-    ensure_managed_file(HOSTS_PATH, args.force)
-    ensure_managed_file(TUNNELS_PATH, args.force)
+    ensure_managed_file(HOSTS_PATH, force)
+    ensure_managed_file(TUNNELS_PATH, force)
     ensure_permissions()
-    print(f"Initialized SSH config in {SSH_DIR}")
 
 
 def cmd_add_host(args: argparse.Namespace) -> None:
@@ -335,31 +257,36 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     run_interactive_command(["ssh", "-N", alias])
 
 
-def cmd_copy_to(args: argparse.Namespace) -> None:
+def cmd_copy(args: argparse.Namespace) -> None:
     ensure_initialized()
     hosts, _ = load_entries()
     host = get_host_by_alias(hosts, args.alias)
     if host is None:
         raise SSHManError(f"Host alias {args.alias!r} not found.")
-    local_path = Path(args.local_path).expanduser()
-    if not local_path.exists():
-        raise SSHManError(f"Local path not found: {local_path}")
-    if local_path.is_dir() and not args.recursive:
-        raise SSHManError("Local path is a directory. Re-run with --recursive.")
-    run_interactive_command(build_scp_command(host, args.recursive, str(local_path), f"{args.alias}:{args.remote_path}"))
+    source = args.source
+    destination = args.destination
+    source_remote = source.startswith(":")
+    destination_remote = destination.startswith(":")
+    if source_remote == destination_remote:
+        raise SSHManError("Copy requires exactly one remote path prefixed with ':'.")
 
+    if source_remote:
+        local_target = Path(destination).expanduser()
+        local_parent = local_target.parent if local_target.name else local_target
+        if not local_parent.exists():
+            raise SSHManError(f"Local destination directory does not exist: {local_parent}")
+        source_arg = f"{args.alias}:{source[1:]}"
+        destination_arg = str(local_target)
+    else:
+        local_source = Path(source).expanduser()
+        if not local_source.exists():
+            raise SSHManError(f"Local path not found: {local_source}")
+        if local_source.is_dir() and not args.recursive:
+            raise SSHManError("Local path is a directory. Re-run with --recursive.")
+        source_arg = str(local_source)
+        destination_arg = f"{args.alias}:{destination[1:]}"
 
-def cmd_copy_from(args: argparse.Namespace) -> None:
-    ensure_initialized()
-    hosts, _ = load_entries()
-    host = get_host_by_alias(hosts, args.alias)
-    if host is None:
-        raise SSHManError(f"Host alias {args.alias!r} not found.")
-    local_target = Path(args.local_path).expanduser()
-    local_parent = local_target.parent if local_target.name else local_target
-    if not local_parent.exists():
-        raise SSHManError(f"Local destination directory does not exist: {local_parent}")
-    run_interactive_command(build_scp_command(host, args.recursive, f"{args.alias}:{args.remote_path}", str(local_target)))
+    run_interactive_command(build_scp_command(host, args.recursive, source_arg, destination_arg))
 
 
 def cmd_exec(args: argparse.Namespace) -> None:
@@ -421,35 +348,8 @@ def cmd_remove(args: argparse.Namespace) -> None:
     raise SSHManError(f"Alias {args.alias!r} not found.")
 
 
-def cmd_check(args: argparse.Namespace) -> None:
-    ensure_initialized()
-    result = capture_check_output()
-    issues = result["issues"]
-    warnings = result["warnings"]
-
-    print("Check results")
-    if issues:
-        for issue in issues:
-            print(f"  - {issue}")
-        for warning in warnings:
-            print(f"  - Warning: {warning}")
-        raise SSHManError("One or more checks failed.")
-
-    print("  - OK: SSH directory permissions look reasonable")
-    print("  - OK: No duplicate aliases or tunnel ports")
-    print("  - OK: ssh config structure is valid enough for basic use")
-    for warning in warnings:
-        print(f"  - Warning: {warning}")
-
-
-def cmd_backup(args: argparse.Namespace) -> None:
-    ensure_ssh_dirs()
-    backup_dir = backup_paths()
-    print(f"Backup created at {backup_dir}")
-
-
 def cmd_import_inventory(args: argparse.Namespace) -> None:
-    ensure_initialized()
+    ensure_initialized(auto_create=True)
     path = Path(args.file).expanduser()
     if not path.exists():
         raise SSHManError(f"Inventory file not found: {path}")
@@ -495,76 +395,6 @@ def cmd_template(args: argparse.Namespace) -> None:
         print(f"Wrote template to {destination}")
         return
     print(write_template())
-
-
-def cmd_bootstrap_key(args: argparse.Namespace) -> None:
-    validate_alias(args.alias)
-    validate_port(args.port)
-    identity_path = ensure_local_key(args.identity_file, args.comment)
-    public_key_path = identity_path.with_suffix(identity_path.suffix + ".pub") if identity_path.suffix else Path(f"{identity_path}.pub")
-    if not public_key_path.exists():
-        raise SSHManError(f"Public key not found: {public_key_path}")
-
-    print(f"Deploying {public_key_path} to {args.user}@{args.host}:{args.port}")
-    deploy_public_key(
-        hostname=args.host,
-        user=args.user,
-        port=args.port,
-        public_key_path=public_key_path,
-        proxy_jump=None,
-    )
-    verify_key_login(
-        hostname=args.host,
-        user=args.user,
-        port=args.port,
-        identity_file=identity_path,
-        proxy_jump=None,
-    )
-    print("Key bootstrap completed.")
-
-
-def cmd_onboard_host(args: argparse.Namespace) -> None:
-    ensure_initialized()
-    validate_alias(args.alias)
-    validate_port(args.port)
-    identity_path = ensure_local_key(args.identity_file, args.comment)
-    public_key_path = identity_path.with_suffix(identity_path.suffix + ".pub") if identity_path.suffix else Path(f"{identity_path}.pub")
-    if not public_key_path.exists():
-        raise SSHManError(f"Public key not found: {public_key_path}")
-
-    hosts, tunnels = load_entries()
-    ensure_unique_alias(args.alias, hosts, tunnels)
-
-    print(f"Bootstrapping key auth for {args.user}@{args.host}:{args.port}")
-    deploy_public_key(
-        hostname=args.host,
-        user=args.user,
-        port=args.port,
-        public_key_path=public_key_path,
-        proxy_jump=args.proxy_jump,
-    )
-    verify_key_login(
-        hostname=args.host,
-        user=args.user,
-        port=args.port,
-        identity_file=identity_path,
-        proxy_jump=args.proxy_jump,
-    )
-
-    entry = HostEntry(
-        alias=args.alias,
-        hostname=args.host,
-        user=args.user,
-        port=args.port,
-        group=args.group,
-        identity_file=args.identity_file,
-        note=args.note,
-        proxy_jump=args.proxy_jump,
-    )
-    backup_paths()
-    append_entry(HOSTS_PATH, render_host_entry(entry))
-    print(f"Onboarded host {entry.alias}")
-    maybe_validate_alias(entry.alias)
 
 
 def apply_host_inventory(inventory_host: InventoryHost, on_conflict: str, use_passwords: bool) -> dict[str, int]:
@@ -698,9 +528,12 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         raise SSHManError("Doctor found blocking issues.")
 
 
-def ensure_initialized() -> None:
+def ensure_initialized(auto_create: bool = False) -> None:
     if not CONFIG_PATH.exists() or not HOSTS_PATH.exists() or not TUNNELS_PATH.exists():
-        raise SSHManError("sshman is not initialized. Run `sshman init` first.")
+        if auto_create:
+            init_config(force=False)
+            return
+        raise SSHManError("sshman config is missing. Start with `sshman import --file inventory.yaml`.")
 
 
 def ensure_ssh_dirs() -> None:

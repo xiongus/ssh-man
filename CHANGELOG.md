@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+
+- reduced the public CLI surface to a smaller golden-path command set
+- replaced `copy-to` and `copy-from` with a single `copy` command
+- removed public `init`, `add-host`, `add-tunnel`, `show`, `check`, `backup`, `bootstrap-key`, and `onboard-host` commands
+- made inventory import auto-initialize managed SSH config when needed
+
 ## 0.7.0
 
 - replaced CSV import with a single YAML inventory import flow

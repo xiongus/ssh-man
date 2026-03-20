@@ -3,7 +3,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="sshman",
-    version="0.7.0",
+    version="0.8.0",
     description="Offline SSH config and tunnel manager for macOS/Linux terminals.",
     packages=find_packages(),
     entry_points={
