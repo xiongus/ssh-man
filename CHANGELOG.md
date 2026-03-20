@@ -2,6 +2,12 @@
 
 # Changelog
 
+## 0.4.0
+
+- added `scripts/install.sh` for self-contained system-wide installation
+- added `scripts/uninstall.sh` for cleanup
+- documented fixed-location installation that does not depend on the source checkout
+
 ## 0.3.0
 
 - added `connect` to open a managed SSH host directly

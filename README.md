@@ -20,7 +20,24 @@ Offline SSH config and tunnel manager for macOS/Linux terminals.
 - It does not store server passwords
 - It is designed around native `ssh`, SSH keys, and macOS Keychain
 
-## Install locally
+## Install
+
+System-wide install:
+
+```bash
+cd /Users/xiongus/Documents/initiate
+sudo ./scripts/install.sh
+```
+
+This copies `sshman` into a fixed system location and creates `/usr/local/bin/sshman`, so the source checkout is no longer required after install.
+
+Remove it later with:
+
+```bash
+sudo ./scripts/uninstall.sh
+```
+
+Editable local development install:
 
 ```bash
 cd /Users/xiongus/Documents/initiate
@@ -74,7 +91,7 @@ You can also run it without installing the console script:
 python3 -m sshman.cli --help
 ```
 
-After `python3 -m pip install -e .`, you only need to install it once on this machine. The `sshman` command will keep using your working copy in this folder, so later code changes are reflected immediately.
+The editable install is best for development. If you want a self-contained machine install, use `./scripts/install.sh` instead.
 
 ## CSV import
 
