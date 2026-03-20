@@ -10,6 +10,7 @@ Offline SSH config and tunnel manager for macOS/Linux terminals.
 - Bootstraps SSH public-key auth for first-time server setup
 - Lets you connect to a managed host or start a managed tunnel directly
 - Supports common file copy and remote command workflows
+- Supports maintenance workflows like rename, diagnostics, and incremental CSV import
 - Backs up managed config files before changes
 - Lists and shows managed entries
 - Runs basic checks for alias conflicts, ports, permissions, and agent status
@@ -58,7 +59,9 @@ sshman tunnel t-s16-8001
 sshman copy-to s36 ./app.jar /root/app.jar
 sshman copy-from s36 /var/log/app.log ./app.log
 sshman exec s36 "hostname"
+sshman rename s36 jump-box
 sshman remove t-s16-8001
+sshman doctor
 sshman check
 ```
 
@@ -117,6 +120,26 @@ Tunnel CSV headers:
 
 ```csv
 alias,via,local_port,target_host,target_port,bind_address,note
+```
+
+Import conflict handling:
+
+```bash
+sshman import-csv --type host --file hosts.csv --on-conflict error
+sshman import-csv --type host --file hosts.csv --on-conflict skip
+sshman import-csv --type host --file hosts.csv --on-conflict update
+```
+
+Rename existing aliases:
+
+```bash
+sshman rename old-alias new-alias
+```
+
+Run richer diagnostics:
+
+```bash
+sshman doctor
 ```
 
 ## Notes

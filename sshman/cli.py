@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     exec_parser.add_argument("command")
     exec_parser.set_defaults(func=cmd_exec)
 
+    rename_parser = subparsers.add_parser("rename", help="Rename a managed host or tunnel alias.")
+    rename_parser.add_argument("old_alias")
+    rename_parser.add_argument("new_alias")
+    rename_parser.set_defaults(func=cmd_rename)
+
     remove_parser = subparsers.add_parser("remove", help="Remove a managed host or tunnel entry.")
     remove_parser.add_argument("alias")
     remove_parser.set_defaults(func=cmd_remove)
@@ -151,12 +156,21 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser = subparsers.add_parser("check", help="Run environment and config checks.")
     check_parser.set_defaults(func=cmd_check)
 
+    doctor_parser = subparsers.add_parser("doctor", help="Run richer SSH environment diagnostics.")
+    doctor_parser.set_defaults(func=cmd_doctor)
+
     backup_parser = subparsers.add_parser("backup", help="Create a timestamped ~/.ssh backup.")
     backup_parser.set_defaults(func=cmd_backup)
 
     import_parser = subparsers.add_parser("import-csv", help="Import hosts or tunnels from CSV.")
     import_parser.add_argument("--type", required=True, choices=("host", "tunnel"))
     import_parser.add_argument("--file", required=True)
+    import_parser.add_argument(
+        "--on-conflict",
+        choices=("error", "skip", "update"),
+        default="error",
+        help="How to handle existing aliases during import.",
+    )
     import_parser.set_defaults(func=cmd_import_csv)
 
     bootstrap_parser = subparsers.add_parser(
@@ -367,6 +381,32 @@ def cmd_exec(args: argparse.Namespace) -> None:
     run_interactive_command(["ssh", args.alias, args.command])
 
 
+def cmd_rename(args: argparse.Namespace) -> None:
+    ensure_initialized()
+    validate_alias(args.new_alias)
+    hosts, tunnels = load_entries()
+    ensure_unique_alias(args.new_alias, hosts, tunnels)
+    host = get_host_by_alias(hosts, args.old_alias)
+    if host is not None:
+        backup_paths()
+        host.alias = args.new_alias
+        for tunnel in tunnels:
+            if tunnel.via == args.old_alias:
+                tunnel.via = args.new_alias
+        rewrite_hosts_file(hosts)
+        rewrite_tunnels_file(tunnels, hosts)
+        print(f"Renamed host {args.old_alias} -> {args.new_alias}")
+        return
+    tunnel = get_tunnel_by_alias(tunnels, args.old_alias)
+    if tunnel is not None:
+        backup_paths()
+        tunnel.alias = args.new_alias
+        rewrite_tunnels_file(tunnels, hosts)
+        print(f"Renamed tunnel {args.old_alias} -> {args.new_alias}")
+        return
+    raise SSHManError(f"Alias {args.old_alias!r} not found.")
+
+
 def cmd_remove(args: argparse.Namespace) -> None:
     ensure_initialized()
     hosts, tunnels = load_entries()
@@ -377,12 +417,16 @@ def cmd_remove(args: argparse.Namespace) -> None:
             raise SSHManError(
                 "Cannot remove host with dependent tunnels: " + ", ".join(dependent_tunnels)
             )
-        remove_entry_from_file(HOSTS_PATH, args.alias)
+        backup_paths()
+        hosts = [entry for entry in hosts if entry.alias != args.alias]
+        rewrite_hosts_file(hosts)
         print(f"Removed host {args.alias}")
         return
     tunnel = get_tunnel_by_alias(tunnels, args.alias)
     if tunnel is not None:
-        remove_entry_from_file(TUNNELS_PATH, args.alias)
+        backup_paths()
+        tunnels = [entry for entry in tunnels if entry.alias != args.alias]
+        rewrite_tunnels_file(tunnels, hosts)
         print(f"Removed tunnel {args.alias}")
         return
     raise SSHManError(f"Alias {args.alias!r} not found.")
@@ -390,46 +434,9 @@ def cmd_remove(args: argparse.Namespace) -> None:
 
 def cmd_check(args: argparse.Namespace) -> None:
     ensure_initialized()
-    hosts, tunnels = load_entries()
-    issues: list[str] = []
-    warnings: list[str] = []
-
-    if not CONFIG_PATH.exists():
-        issues.append(f"Missing {CONFIG_PATH}")
-    if CONFIG_PATH.exists() and "Include ~/.ssh/config.d/*.conf" not in CONFIG_PATH.read_text():
-        issues.append("Main config does not include ~/.ssh/config.d/*.conf")
-
-    aliases = [entry.alias for entry in hosts] + [entry.alias for entry in tunnels]
-    duplicate_aliases = sorted({alias for alias in aliases if aliases.count(alias) > 1})
-    if duplicate_aliases:
-        issues.append(f"Duplicate aliases: {', '.join(duplicate_aliases)}")
-
-    tunnel_ports = [entry.local_port for entry in tunnels]
-    duplicate_ports = sorted({str(port) for port in tunnel_ports if tunnel_ports.count(port) > 1})
-    if duplicate_ports:
-        issues.append(f"Duplicate tunnel local ports: {', '.join(duplicate_ports)}")
-
-    for host in hosts:
-        if host.identity_file:
-            identity = Path(os.path.expanduser(host.identity_file))
-            if not identity.exists():
-                issues.append(f"Missing identity file for {host.alias}: {host.identity_file}")
-
-    config_perm = mode_string(CONFIG_PATH)
-    if config_perm and config_perm not in {"600", "644"}:
-        issues.append(f"Unexpected config permission on {CONFIG_PATH}: {config_perm}")
-
-    ssh_perm = mode_string(SSH_DIR)
-    if ssh_perm and ssh_perm != "700":
-        issues.append(f"Unexpected SSH dir permission on {SSH_DIR}: {ssh_perm}")
-
-    ssh_check = run_command(["ssh", "-G", "localhost"])
-    if ssh_check.returncode != 0:
-        issues.append("ssh command is not available or failed to inspect config.")
-
-    agent_keys = run_command(["ssh-add", "-l"])
-    if agent_keys.returncode != 0:
-        warnings.append("ssh-agent has no loaded identities or is unavailable.")
+    result = capture_check_output()
+    issues = result["issues"]
+    warnings = result["warnings"]
 
     print("Check results")
     if issues:
@@ -467,11 +474,26 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
         return
 
     imported = 0
+    skipped = 0
+    updated = 0
     for row in rows:
         row = {key: (value or "").strip() for key, value in row.items()}
+        alias = row["alias"]
+        hosts, tunnels = load_entries()
+        exists = get_host_by_alias(hosts, alias) if args.type == "host" else get_tunnel_by_alias(tunnels, alias)
+        if exists is not None:
+            if args.on_conflict == "error":
+                raise SSHManError(f"Alias {alias!r} already exists.")
+            if args.on_conflict == "skip":
+                skipped += 1
+                continue
+            if args.on_conflict == "update":
+                cmd_remove(argparse.Namespace(alias=alias))
+                updated += 1
+
         if args.type == "host":
             namespace = argparse.Namespace(
-                alias=row["alias"],
+                alias=alias,
                 host=row["host"],
                 user=row["user"],
                 port=int(row["port"] or 22),
@@ -483,7 +505,7 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
             cmd_add_host(namespace)
         else:
             namespace = argparse.Namespace(
-                alias=row["alias"],
+                alias=alias,
                 via=row["via"],
                 local_port=int(row["local_port"]),
                 target_host=row["target_host"],
@@ -494,6 +516,10 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
             cmd_add_tunnel(namespace)
         imported += 1
     print(f"Imported {imported} {args.type} entries from {path}")
+    if updated:
+        print(f"Updated existing entries: {updated}")
+    if skipped:
+        print(f"Skipped existing entries: {skipped}")
 
 
 def cmd_bootstrap_key(args: argparse.Namespace) -> None:
@@ -564,6 +590,50 @@ def cmd_onboard_host(args: argparse.Namespace) -> None:
     append_entry(HOSTS_PATH, render_host_entry(entry))
     print(f"Onboarded host {entry.alias}")
     maybe_validate_alias(entry.alias)
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    ensure_initialized()
+    hosts, tunnels = load_entries()
+    issues: list[str] = []
+    warnings: list[str] = []
+    infos: list[str] = []
+
+    check_output = capture_check_output()
+    if check_output["failed"]:
+        issues.extend(check_output["issues"])
+    warnings.extend(check_output["warnings"])
+    infos.extend(check_output["infos"])
+
+    private_key = Path(os.path.expanduser(DEFAULT_IDENTITY))
+    public_key = Path(f"{private_key}.pub")
+    if private_key.exists() and public_key.exists():
+        infos.append(f"Default key pair present: {private_key}")
+    else:
+        warnings.append("Default SSH key pair is incomplete or missing.")
+
+    if CONFIG_PATH.exists():
+        infos.append(f"Managed config present: {CONFIG_PATH}")
+    if hosts:
+        infos.append(f"Managed hosts: {len(hosts)}")
+    if tunnels:
+        infos.append(f"Managed tunnels: {len(tunnels)}")
+
+    if not backups_exist():
+        warnings.append("No sshman backups found yet. Run `sshman backup` after major changes.")
+
+    if not shutil.which("ssh-copy-id"):
+        warnings.append("ssh-copy-id is not installed; onboarding falls back to plain ssh.")
+
+    print("Doctor results")
+    for issue in issues:
+        print(f"  - Issue: {issue}")
+    for warning in warnings:
+        print(f"  - Warning: {warning}")
+    for info in infos:
+        print(f"  - Info: {info}")
+    if issues:
+        raise SSHManError("Doctor found blocking issues.")
 
 
 def ensure_initialized() -> None:
@@ -704,7 +774,7 @@ def render_host_entry(entry: HostEntry) -> str:
         lines.append(f"  IdentityFile {entry.identity_file}")
     if entry.proxy_jump:
         lines.append(f"  ProxyJump {entry.proxy_jump}")
-    lines.append("")
+    lines.extend(["", ""])
     return "\n".join(lines)
 
 
@@ -728,7 +798,7 @@ def render_tunnel_entry(entry: TunnelEntry, via_host: HostEntry | None) -> str:
         lines.append(f"  IdentityFile {via_host.identity_file}")
     if via_host.proxy_jump:
         lines.append(f"  ProxyJump {via_host.proxy_jump}")
-    lines.append("")
+    lines.extend(["", ""])
     return "\n".join(lines)
 
 
@@ -739,26 +809,21 @@ def append_entry(path: Path, block: str) -> None:
         handle.write(block)
 
 
-def remove_entry_from_file(path: Path, alias: str) -> None:
-    backup_paths()
-    blocks = split_config_blocks(path)
-    kept: list[tuple[list[str], list[str]]] = []
-    removed = False
-    for comments, lines in blocks:
-        if lines and lines[0].startswith("Host ") and lines[0].split(maxsplit=1)[1].strip() == alias:
-            removed = True
-            continue
-        kept.append((comments, lines))
-    if not removed:
-        raise SSHManError(f"Alias {alias!r} not found in {path}.")
+def rewrite_hosts_file(hosts: list[HostEntry]) -> None:
     content = MANAGED_HEADER
-    for comments, lines in kept:
-        if comments:
-            content += "\n".join(comments) + "\n"
-        if lines:
-            content += "\n".join(lines) + "\n"
-        content += "\n"
-    write_file(path, content.rstrip() + "\n")
+    for host in hosts:
+        content += render_host_entry(host)
+    write_file(HOSTS_PATH, content)
+
+
+def rewrite_tunnels_file(tunnels: list[TunnelEntry], hosts: list[HostEntry]) -> None:
+    content = MANAGED_HEADER
+    for tunnel in tunnels:
+        via_host = get_host_by_alias(hosts, tunnel.via)
+        if via_host is None:
+            raise SSHManError(f"Tunnel {tunnel.alias} references missing host {tunnel.via!r}.")
+        content += render_tunnel_entry(tunnel, via_host)
+    write_file(TUNNELS_PATH, content)
 
 
 def parse_metadata_comments(comments: Iterable[str]) -> dict[str, str]:
@@ -812,6 +877,60 @@ def build_scp_command(host: HostEntry, recursive: bool, source: str, destination
         command.extend(["-o", f"ProxyJump={host.proxy_jump}"])
     command.extend([source, destination])
     return command
+
+
+def capture_check_output() -> dict[str, list[str] | bool]:
+    hosts, tunnels = load_entries()
+    issues: list[str] = []
+    warnings: list[str] = []
+    infos: list[str] = []
+
+    if not CONFIG_PATH.exists():
+        issues.append(f"Missing {CONFIG_PATH}")
+    if CONFIG_PATH.exists() and "Include ~/.ssh/config.d/*.conf" not in CONFIG_PATH.read_text():
+        issues.append("Main config does not include ~/.ssh/config.d/*.conf")
+
+    aliases = [entry.alias for entry in hosts] + [entry.alias for entry in tunnels]
+    duplicate_aliases = sorted({alias for alias in aliases if aliases.count(alias) > 1})
+    if duplicate_aliases:
+        issues.append(f"Duplicate aliases: {', '.join(duplicate_aliases)}")
+
+    tunnel_ports = [entry.local_port for entry in tunnels]
+    duplicate_ports = sorted({str(port) for port in tunnel_ports if tunnel_ports.count(port) > 1})
+    if duplicate_ports:
+        issues.append(f"Duplicate tunnel local ports: {', '.join(duplicate_ports)}")
+
+    for host in hosts:
+        if host.identity_file:
+            identity = Path(os.path.expanduser(host.identity_file))
+            if not identity.exists():
+                issues.append(f"Missing identity file for {host.alias}: {host.identity_file}")
+
+    config_perm = mode_string(CONFIG_PATH)
+    if config_perm and config_perm not in {"600", "644"}:
+        warnings.append(f"Unexpected config permission on {CONFIG_PATH}: {config_perm}")
+
+    ssh_perm = mode_string(SSH_DIR)
+    if ssh_perm and ssh_perm != "700":
+        warnings.append(f"Unexpected SSH dir permission on {SSH_DIR}: {ssh_perm}")
+
+    ssh_check = run_command(["ssh", "-G", "localhost"])
+    if ssh_check.returncode != 0:
+        issues.append("ssh command is not available or failed to inspect config.")
+    else:
+        infos.append("ssh command is available.")
+
+    agent_keys = run_command(["ssh-add", "-l"])
+    if agent_keys.returncode != 0:
+        warnings.append("ssh-agent has no loaded identities or is unavailable.")
+    else:
+        infos.append("ssh-agent has loaded identities.")
+
+    return {"failed": bool(issues), "issues": issues, "warnings": warnings, "infos": infos}
+
+
+def backups_exist() -> bool:
+    return BACKUPS_DIR.exists() and any(BACKUPS_DIR.iterdir())
 
 
 def ensure_unique_alias(alias: str, hosts: Iterable[HostEntry], tunnels: Iterable[TunnelEntry]) -> None:

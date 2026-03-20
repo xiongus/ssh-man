@@ -1,6 +1,11 @@
 # Changelog
 
-# Changelog
+## 0.6.0
+
+- added `rename` for managed host and tunnel aliases
+- added `doctor` for richer SSH environment diagnostics
+- added `import-csv --on-conflict` with `error`, `skip`, and `update` modes
+- updated host rename behavior to keep dependent tunnels aligned
 
 ## 0.5.0
 
