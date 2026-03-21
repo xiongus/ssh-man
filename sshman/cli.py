@@ -22,8 +22,11 @@ CONFIG_D_DIR = SSH_DIR / "config.d"
 HOSTS_PATH = CONFIG_D_DIR / "hosts.conf"
 TUNNELS_PATH = CONFIG_D_DIR / "tunnels.conf"
 BACKUPS_DIR = SSH_DIR / "backups"
+APP_CONFIG_DIR = Path.home() / ".config" / "sshman"
+DEFAULT_INVENTORY_PATH = APP_CONFIG_DIR / "inventory.yaml"
 DEFAULT_IDENTITY = "~/.ssh/id_ed25519"
 MANAGED_HEADER = "# Managed by sshman. Manual edits are allowed.\n"
+INCLUDE_LINE = "Include ~/.ssh/config.d/*.conf"
 ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -102,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.set_defaults(func=cmd_doctor)
 
     import_parser = subparsers.add_parser("import", help="Import hosts and tunnels from YAML inventory.")
-    import_parser.add_argument("--file", required=True)
+    import_parser.add_argument("--file", help="Inventory file path. Defaults to ~/.config/sshman/inventory.yaml.")
     import_parser.add_argument(
         "--on-conflict",
         choices=("error", "skip", "update"),
@@ -117,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.set_defaults(func=cmd_import_inventory)
 
     template_parser = subparsers.add_parser("template", help="Write or print the YAML inventory template.")
-    template_parser.add_argument("--file", help="Write the template to a file instead of stdout.")
+    template_parser.add_argument("--file", help="Template file path. Defaults to ~/.config/sshman/inventory.yaml.")
     template_parser.set_defaults(func=cmd_template)
 
     return parser
@@ -125,12 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def init_config(force: bool = False) -> None:
     ensure_ssh_dirs()
-    if CONFIG_PATH.exists() and not force and "Managed by sshman" not in CONFIG_PATH.read_text():
-        raise SSHManError(
-            f"{CONFIG_PATH} already exists and is not managed by sshman. Back it up or pass --force."
-        )
-
-    write_file(CONFIG_PATH, render_main_config())
+    if not CONFIG_PATH.exists():
+        write_file(CONFIG_PATH, render_main_config())
+    else:
+        ensure_include_line(CONFIG_PATH)
     ensure_managed_file(HOSTS_PATH, force)
     ensure_managed_file(TUNNELS_PATH, force)
     ensure_permissions()
@@ -214,25 +215,6 @@ def cmd_list(args: argparse.Namespace) -> None:
             note = f" [{tunnel.note}]" if tunnel.note else ""
             target = f"{tunnel.target_host}:{tunnel.target_port}"
             print(f"  {tunnel.alias:16} {tunnel.bind_address}:{tunnel.local_port} -> {target} via {tunnel.via}{note}")
-
-
-def cmd_show(args: argparse.Namespace) -> None:
-    ensure_initialized()
-    hosts, tunnels = load_entries()
-    for host in hosts:
-        if host.alias == args.alias:
-            print(render_host_entry(host).strip())
-            print()
-            print(f"Usage: ssh {host.alias}")
-            return
-    for tunnel in tunnels:
-        if tunnel.alias == args.alias:
-            via_host = get_host_by_alias(hosts, tunnel.via)
-            print(render_tunnel_entry(tunnel, via_host).strip())
-            print()
-            print(f"Usage: ssh -N {tunnel.alias}")
-            return
-    raise SSHManError(f"Alias {args.alias!r} not found.")
 
 
 def cmd_connect(args: argparse.Namespace) -> None:
@@ -350,7 +332,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
 
 def cmd_import_inventory(args: argparse.Namespace) -> None:
     ensure_initialized(auto_create=True)
-    path = Path(args.file).expanduser()
+    path = resolve_inventory_path(args.file)
     if not path.exists():
         raise SSHManError(f"Inventory file not found: {path}")
 
@@ -389,12 +371,10 @@ def cmd_import_inventory(args: argparse.Namespace) -> None:
 
 
 def cmd_template(args: argparse.Namespace) -> None:
-    if args.file:
-        destination = Path(args.file).expanduser()
-        write_template(destination)
-        print(f"Wrote template to {destination}")
-        return
-    print(write_template())
+    destination = resolve_inventory_path(args.file)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    write_template(destination)
+    print(f"Wrote template to {destination}")
 
 
 def apply_host_inventory(inventory_host: InventoryHost, on_conflict: str, use_passwords: bool) -> dict[str, int]:
@@ -506,10 +486,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     if CONFIG_PATH.exists():
         infos.append(f"Managed config present: {CONFIG_PATH}")
+        if INCLUDE_LINE in CONFIG_PATH.read_text(encoding="utf-8"):
+            infos.append("Main ssh config includes sshman managed config.d files.")
     if hosts:
         infos.append(f"Managed hosts: {len(hosts)}")
     if tunnels:
         infos.append(f"Managed tunnels: {len(tunnels)}")
+    infos.append(f"Default inventory path: {DEFAULT_INVENTORY_PATH}")
 
     if not backups_exist():
         warnings.append("No sshman backups found yet. Run `sshman backup` after major changes.")
@@ -533,18 +516,19 @@ def ensure_initialized(auto_create: bool = False) -> None:
         if auto_create:
             init_config(force=False)
             return
-        raise SSHManError("sshman config is missing. Start with `sshman import --file inventory.yaml`.")
+        raise SSHManError("sshman config is missing. Start with `sshman import`.")
 
 
 def ensure_ssh_dirs() -> None:
     SSH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     CONFIG_D_DIR.mkdir(mode=0o700, exist_ok=True)
     BACKUPS_DIR.mkdir(mode=0o700, exist_ok=True)
+    APP_CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def ensure_permissions() -> None:
     os.chmod(SSH_DIR, 0o700)
-    for path in (CONFIG_PATH, HOSTS_PATH, TUNNELS_PATH):
+    for path in (HOSTS_PATH, TUNNELS_PATH):
         if path.exists():
             os.chmod(path, 0o600)
 
@@ -557,10 +541,23 @@ def ensure_managed_file(path: Path, force: bool = False) -> None:
     write_file(path, MANAGED_HEADER)
 
 
+def ensure_include_line(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    if INCLUDE_LINE in text:
+        return
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += f"\n{INCLUDE_LINE}\n"
+    write_file(path, text)
+
+
+def resolve_inventory_path(value: str | None) -> Path:
+    return Path(value).expanduser() if value else DEFAULT_INVENTORY_PATH
+
+
 def render_main_config() -> str:
     return (
-        MANAGED_HEADER
-        + "Host *\n"
+        "Host *\n"
         + "  ServerAliveInterval 60\n"
         + "  ServerAliveCountMax 3\n"
         + "  TCPKeepAlive yes\n"
@@ -568,7 +565,7 @@ def render_main_config() -> str:
         + "  UseKeychain yes\n"
         + f"  IdentityFile {DEFAULT_IDENTITY}\n"
         + "\n"
-        + "Include ~/.ssh/config.d/*.conf\n"
+        + f"{INCLUDE_LINE}\n"
     )
 
 
@@ -782,8 +779,8 @@ def capture_check_output() -> dict[str, list[str] | bool]:
 
     if not CONFIG_PATH.exists():
         issues.append(f"Missing {CONFIG_PATH}")
-    if CONFIG_PATH.exists() and "Include ~/.ssh/config.d/*.conf" not in CONFIG_PATH.read_text():
-        issues.append("Main config does not include ~/.ssh/config.d/*.conf")
+    if CONFIG_PATH.exists() and INCLUDE_LINE not in CONFIG_PATH.read_text(encoding="utf-8"):
+        warnings.append("Main config does not include ~/.ssh/config.d/*.conf")
 
     aliases = [entry.alias for entry in hosts] + [entry.alias for entry in tunnels]
     duplicate_aliases = sorted({alias for alias in aliases if aliases.count(alias) > 1})
@@ -800,10 +797,6 @@ def capture_check_output() -> dict[str, list[str] | bool]:
             identity = Path(os.path.expanduser(host.identity_file))
             if not identity.exists():
                 issues.append(f"Missing identity file for {host.alias}: {host.identity_file}")
-
-    config_perm = mode_string(CONFIG_PATH)
-    if config_perm and config_perm not in {"600", "644"}:
-        warnings.append(f"Unexpected config permission on {CONFIG_PATH}: {config_perm}")
 
     ssh_perm = mode_string(SSH_DIR)
     if ssh_perm and ssh_perm != "700":

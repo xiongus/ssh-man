@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- changed sshman to preserve an existing `~/.ssh/config` and only add an `Include ~/.ssh/config.d/*.conf` line
+- moved the default inventory location to `~/.config/sshman/inventory.yaml`
+- updated `template` and `import` to use the default inventory path when `--file` is omitted
+- removed the sample repo-local `inventory.yaml` to avoid leaking host definitions into source control
+
 ## 0.8.0
 
 - reduced the public CLI surface to a smaller golden-path command set

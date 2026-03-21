@@ -34,8 +34,8 @@ sudo ./scripts/uninstall.sh
 ## Golden Path
 
 ```bash
-sshman template --file inventory.yaml
-sshman import --file inventory.yaml --on-conflict update
+sshman template
+sshman import --on-conflict update
 sshman list
 sshman connect jump-box
 sshman tunnel t-s16-8001
@@ -65,24 +65,37 @@ sshman copy jump-box :/opt/app/logs ./logs --recursive
 
 `sshman` supports one import format only: YAML.
 
+Default inventory location:
+
+```bash
+~/.config/sshman/inventory.yaml
+```
+
 Write a starter inventory:
 
 ```bash
-sshman template --file inventory.yaml
+sshman template
 ```
 
 Import it:
 
 ```bash
-sshman import --file inventory.yaml --on-conflict error
-sshman import --file inventory.yaml --on-conflict skip
-sshman import --file inventory.yaml --on-conflict update
+sshman import --on-conflict error
+sshman import --on-conflict skip
+sshman import --on-conflict update
 ```
 
 If you choose to keep passwords in the inventory for first-time bootstrap only:
 
 ```bash
-sshman import --file inventory.yaml --on-conflict update --use-passwords
+sshman import --on-conflict update --use-passwords
+```
+
+You can still override the file path explicitly:
+
+```bash
+sshman template --file ./inventory.yaml
+sshman import --file ./inventory.yaml --on-conflict update
 ```
 
 Minimal example:
@@ -112,3 +125,4 @@ hosts:
 - password fields are optional and only used when `--use-passwords` is passed
 - if passwords are present and you use `--use-passwords`, `sshpass` must be installed
 - editable local development is still possible with `python3 -m pip install -e .`
+- `sshman` preserves an existing `~/.ssh/config` and only appends an `Include ~/.ssh/config.d/*.conf` line when needed
