@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from sshman.models import InventoryHost, InventoryTunnel
@@ -79,6 +80,62 @@ def load_inventory(path: Path) -> list[InventoryHost]:
             )
         hosts.append(host)
     return hosts
+
+
+def save_inventory(path: Path, hosts: list[InventoryHost]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_inventory(hosts), encoding="utf-8")
+
+
+def render_inventory(hosts: list[InventoryHost]) -> str:
+    lines = ["hosts:"]
+    if not hosts:
+        return "hosts: []\n"
+
+    for host in hosts:
+        lines.extend(
+            [
+                "  - alias: " + render_scalar(host.alias),
+                "    host: " + render_scalar(host.host),
+                "    user: " + render_scalar(host.user),
+                f"    port: {host.port}",
+                "    group: " + render_scalar(host.group),
+                "    note: " + render_nullable(host.note),
+                "    proxy_jump: " + render_nullable(host.proxy_jump),
+                "    identity_file: " + render_nullable(host.identity_file),
+                "    password: " + render_nullable(host.password),
+                "    default_tunnels:",
+            ]
+        )
+        if host.default_tunnels:
+            for alias in host.default_tunnels:
+                lines.append("      - " + render_scalar(alias))
+        else:
+            lines[-1] = "    default_tunnels: []"
+        lines.append("    tunnels:")
+        if host.tunnels:
+            for tunnel in host.tunnels:
+                lines.extend(
+                    [
+                        "      - alias: " + render_scalar(tunnel.alias),
+                        f"        local_port: {tunnel.local_port}",
+                        "        target_host: " + render_scalar(tunnel.target_host),
+                        f"        target_port: {tunnel.target_port}",
+                        "        bind_address: " + render_scalar(tunnel.bind_address),
+                        "        note: " + render_nullable(tunnel.note),
+                    ]
+                )
+        else:
+            lines[-1] = "    tunnels: []"
+    return "\n".join(lines) + "\n"
+
+
+def find_host_line(path: Path, alias: str) -> int | None:
+    pattern = re.compile(rf"^\s*-\s+alias:\s+['\"]?{re.escape(alias)}['\"]?\s*$")
+    for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if pattern.match(line):
+            return index
+    return None
 
 
 def parse_simple_yaml(lines: list[str]) -> dict:
@@ -162,6 +219,8 @@ def split_key_value(text: str, lineno: int) -> tuple[str, str]:
 def parse_scalar(value: str):
     if value in {"null", "Null", "NULL", "~", ""}:
         return None
+    if value == "[]":
+        return []
     if value in {"true", "True"}:
         return True
     if value in {"false", "False"}:
@@ -171,6 +230,20 @@ def parse_scalar(value: str):
     if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
         return value[1:-1]
     return value
+
+
+def render_nullable(value: str | None) -> str:
+    return "" if value is None else render_scalar(value)
+
+
+def render_scalar(value: str) -> str:
+    if value == "":
+        return "''"
+    safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-@")
+    if all(char in safe for char in value):
+        return value
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
 
 
 def required_str(data: dict, key: str) -> str:

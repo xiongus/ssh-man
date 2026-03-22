@@ -1,16 +1,16 @@
-# SSHMan 1.0
+# SSHMan 1.0.1
 
 Terminal-first SSH inventory manager for macOS/Linux.
 
-## 1.0 Principles
+## 1.0.1 Principles
 
 - one source of truth: `~/.config/sshman/inventory.yaml`
-- one interactive entrypoint: `sshm`
-- one formal compatibility command: `sshman`
-- one required selector dependency: `fzf`
+- one primary entrypoint: `sshm`
+- `fzf` is required, not optional
 - no GUI
 - no recent-session state machine
 - no implicit "start every tunnel"
+- inventory drives everything; generated SSH config is only the runtime output
 
 ## Install
 
@@ -47,16 +47,16 @@ Generate the default inventory:
 sshm gen
 ```
 
-Edit:
+Open the inventory:
 
 ```bash
-~/.config/sshman/inventory.yaml
+sshm edit
 ```
 
-Sync inventory into SSH config:
+Render inventory into SSH config:
 
 ```bash
-sshm sync --on-conflict update
+sshm sync
 ```
 
 Daily usage:
@@ -64,46 +64,73 @@ Daily usage:
 ```bash
 sshm
 sshm jump-box
-sshm ls
+sshm edit jump-box
 sshm t
 sshm t jump-box --default
 sshm t --status
-sshm cp jump-box ./app.jar :/root/app.jar
-sshm cp jump-box :/var/log/app.log ./app.log
-sshm x jump-box "hostname"
 sshm doctor
 ```
 
-## Commands
+## Main Commands
 
 - `sshm`
-  Open the host selector with `fzf`
+  Open the host selector
 - `sshm <alias>`
-  Connect directly to a host and start that host's default tunnels first
+  Connect directly to one host and start its default tunnels first
 - `sshm ls`
-  List hosts and tunnels
+  Show hosts and tunnels from inventory
 - `sshm t`
-  Pick a tunnel interactively and start it
+  Open the tunnel selector
 - `sshm t <host> --default`
-  Start the host's default tunnels
+  Start that host's default tunnels
 - `sshm t <host> --all`
-  Start all tunnels under that host
+  Start all tunnels under one host
 - `sshm t --status`
-  Show tunnel running/stopped status
-- `sshm cp`
-  Copy files to or from a host
-- `sshm x`
-  Run a remote command
+  Show tunnel runtime status with PID when available
+- `sshm edit`
+  Open the default inventory
+- `sshm edit <alias>`
+  Open the inventory and jump near that host
 - `sshm mv`
-  Rename a host or tunnel alias
+  Rename a host or tunnel in inventory, then sync
 - `sshm rm`
-  Remove a host or tunnel
+  Remove a host or tunnel from inventory, then sync
 - `sshm sync`
-  Import inventory into managed SSH config
+  Render inventory into `~/.ssh/config.d`
 - `sshm gen`
   Write the default inventory template
 - `sshm doctor`
-  Validate dependencies and managed SSH state
+  Validate `fzf`, inventory, and managed SSH state
+
+## Selector UX
+
+`sshm` uses `fzf` as the primary interaction surface.
+
+Host selector keys:
+
+- `Enter`
+  Connect
+- `Ctrl-T`
+  Start the selected host's default tunnels
+- `Ctrl-E`
+  Edit the selected host in inventory
+- `Ctrl-R`
+  Rename the selected host
+- `Ctrl-D`
+  Delete the selected host after confirmation
+- `Ctrl-/`
+  Toggle preview
+
+The preview pane shows:
+
+- alias
+- `user@host:port`
+- group
+- note
+- proxy jump
+- identity file
+- default tunnels
+- tunnel summaries and runtime state
 
 ## Inventory
 
@@ -140,7 +167,7 @@ hosts:
 Notes:
 
 - `password:` is optional
-- password fields are only used when `sshm sync --use-passwords` is passed
+- passwords are only used when you explicitly run `sshm sync --use-passwords`
 - if you use password-assisted bootstrap, `sshpass` must be installed
 - `default_tunnels` must reference tunnels defined under the same host
 
@@ -172,6 +199,6 @@ If you use Codex, the companion skill is:
 It should maintain the inventory file, then run:
 
 ```bash
-sshm sync --on-conflict update
+sshm sync
 sshm doctor
 ```
