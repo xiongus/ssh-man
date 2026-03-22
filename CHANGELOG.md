@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.0
+
+- finalized the 1.0 command model around `sshm`
+- added a short-command public surface: `ls`, `t`, `cp`, `x`, `mv`, `rm`, `sync`, `gen`, `doctor`
+- made bare `sshm` open the host selector and `sshm <alias>` connect directly
+- made `fzf` a required dependency for interactive selection
+- added host-level `default_tunnels`
+- added tunnel running/stopped status with `sshm t --status`
+- installed both `sshm` and `sshman` wrappers
+- rewrote the documentation around the 1.0 golden path
+
 ## 0.9.0
 
 - changed sshman to preserve an existing `~/.ssh/config` and only add an `Include ~/.ssh/config.d/*.conf` line

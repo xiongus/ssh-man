@@ -15,6 +15,8 @@ TEMPLATE = """hosts:
     proxy_jump:
     identity_file: ~/.ssh/id_ed25519
     password:
+    default_tunnels:
+      - t-s16-8001
     tunnels:
       - alias: t-s16-8001
         local_port: 18001
@@ -50,6 +52,7 @@ def load_inventory(path: Path) -> list[InventoryHost]:
             note=nullable_str(item, "note"),
             proxy_jump=nullable_str(item, "proxy_jump"),
             password=nullable_str(item, "password"),
+            default_tunnels=string_list(item, "default_tunnels"),
             tunnels=[],
         )
         tunnels = item.get("tunnels", [])
@@ -67,6 +70,12 @@ def load_inventory(path: Path) -> list[InventoryHost]:
                     bind_address=optional_str(tunnel_item, "bind_address", "127.0.0.1"),
                     note=nullable_str(tunnel_item, "note"),
                 )
+            )
+        tunnel_aliases = {tunnel.alias for tunnel in host.tunnels}
+        missing_defaults = [alias for alias in host.default_tunnels if alias not in tunnel_aliases]
+        if missing_defaults:
+            raise InventoryError(
+                f"Host {host.alias} default_tunnels reference missing tunnels: {', '.join(missing_defaults)}"
             )
         hosts.append(host)
     return hosts
@@ -90,12 +99,19 @@ def parse_simple_yaml(lines: list[str]) -> dict:
             if not isinstance(parent, list):
                 raise InventoryError(f"Line {lineno}: list item without list parent.")
             payload = stripped[2:]
-            item: dict = {}
-            parent.append(item)
             if payload:
-                key, value = split_key_value(payload, lineno)
-                item[key] = parse_scalar(value)
-            stack.append((indent, item))
+                if ":" in payload:
+                    item: dict = {}
+                    parent.append(item)
+                    key, value = split_key_value(payload, lineno)
+                    item[key] = parse_scalar(value)
+                    stack.append((indent, item))
+                else:
+                    parent.append(parse_scalar(payload))
+            else:
+                item = {}
+                parent.append(item)
+                stack.append((indent, item))
             continue
 
         key, value = split_key_value(stripped, lineno)
@@ -195,4 +211,13 @@ def optional_int(data: dict, key: str, default: int) -> int:
         return default
     if not isinstance(value, int):
         raise InventoryError(f"Field {key} must be an integer.")
+    return value
+
+
+def string_list(data: dict, key: str) -> list[str]:
+    value = data.get(key, [])
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise InventoryError(f"Field {key} must be a list of strings.")
     return value

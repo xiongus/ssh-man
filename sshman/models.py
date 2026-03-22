@@ -37,6 +37,7 @@ class InventoryHost:
     note: str | None = None
     proxy_jump: str | None = None
     password: str | None = None
+    default_tunnels: list[str] = field(default_factory=list)
     tunnels: list["InventoryTunnel"] = field(default_factory=list)
 
 

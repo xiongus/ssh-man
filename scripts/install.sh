@@ -15,8 +15,13 @@ cat > "$BIN_DIR/sshman" <<EOF
 PYTHONPATH="$LIB_DIR\${PYTHONPATH:+:\$PYTHONPATH}" exec /usr/bin/env python3 -m sshman.cli "\$@"
 EOF
 
-chmod +x "$BIN_DIR/sshman"
+cat > "$BIN_DIR/sshm" <<EOF
+#!/bin/sh
+PYTHONPATH="$LIB_DIR\${PYTHONPATH:+:\$PYTHONPATH}" exec /usr/bin/env python3 -m sshman.cli "\$@"
+EOF
+
+chmod +x "$BIN_DIR/sshman" "$BIN_DIR/sshm"
 
 echo "Installed sshman to $BIN_DIR/sshman"
+echo "Installed sshm to $BIN_DIR/sshm"
 echo "Library files copied to $LIB_DIR"
-

@@ -35,8 +35,9 @@ class SSHManError(Exception):
 
 
 def main() -> None:
+    argv = preprocess_argv(sys.argv[1:])
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         if not getattr(args, "command", None):
@@ -53,12 +54,16 @@ def main() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="sshman",
+        prog=Path(sys.argv[0]).name,
         description="Offline SSH config and tunnel manager.",
     )
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", metavar="{ls,t,cp,x,mv,rm,doctor,sync,gen}")
 
-    list_parser = subparsers.add_parser("list", help="List managed entries.")
+    open_parser = subparsers.add_parser("__open__", help=argparse.SUPPRESS)
+    open_parser.add_argument("alias", nargs="?")
+    open_parser.set_defaults(func=cmd_open)
+
+    list_parser = subparsers.add_parser("ls", aliases=["list"], help="List managed entries.")
     list_parser.add_argument(
         "--type",
         choices=("all", "host", "tunnel"),
@@ -72,39 +77,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_parser.set_defaults(func=cmd_list)
 
-    connect_parser = subparsers.add_parser("connect", help="Connect to a managed host.")
-    connect_parser.add_argument("alias", nargs="?")
-    connect_parser.set_defaults(func=cmd_connect)
-
-    tunnel_run_parser = subparsers.add_parser("tunnel", help="Start a managed SSH tunnel.")
+    tunnel_run_parser = subparsers.add_parser("t", aliases=["tunnel"], help="Start or inspect tunnels.")
     tunnel_run_parser.add_argument("alias", nargs="?")
+    tunnel_run_parser.add_argument("--all", action="store_true", help="Start all tunnels for the selected host.")
+    tunnel_run_parser.add_argument(
+        "--default",
+        action="store_true",
+        help="Start only the host's default tunnels.",
+    )
+    tunnel_run_parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show current tunnel status instead of starting tunnels.",
+    )
     tunnel_run_parser.set_defaults(func=cmd_tunnel)
 
-    copy_parser = subparsers.add_parser("copy", help="Copy files to or from a managed host.")
+    copy_parser = subparsers.add_parser("cp", aliases=["copy"], help="Copy files to or from a managed host.")
     copy_parser.add_argument("alias")
     copy_parser.add_argument("source")
     copy_parser.add_argument("destination")
     copy_parser.add_argument("-r", "--recursive", action="store_true", help="Copy directories recursively.")
     copy_parser.set_defaults(func=cmd_copy)
 
-    exec_parser = subparsers.add_parser("exec", help="Run one command on a managed host.")
+    exec_parser = subparsers.add_parser("x", aliases=["exec"], help="Run one command on a managed host.")
     exec_parser.add_argument("alias")
     exec_parser.add_argument("command")
     exec_parser.set_defaults(func=cmd_exec)
 
-    rename_parser = subparsers.add_parser("rename", help="Rename a managed host or tunnel alias.")
+    rename_parser = subparsers.add_parser("mv", aliases=["rename"], help="Rename a managed host or tunnel alias.")
     rename_parser.add_argument("old_alias")
     rename_parser.add_argument("new_alias")
     rename_parser.set_defaults(func=cmd_rename)
 
-    remove_parser = subparsers.add_parser("remove", help="Remove a managed host or tunnel entry.")
+    remove_parser = subparsers.add_parser("rm", aliases=["remove"], help="Remove a managed host or tunnel entry.")
     remove_parser.add_argument("alias")
     remove_parser.set_defaults(func=cmd_remove)
 
     doctor_parser = subparsers.add_parser("doctor", help="Run SSH environment diagnostics.")
     doctor_parser.set_defaults(func=cmd_doctor)
 
-    import_parser = subparsers.add_parser("import", help="Import hosts and tunnels from YAML inventory.")
+    import_parser = subparsers.add_parser("sync", aliases=["import"], help="Import hosts and tunnels from YAML inventory.")
     import_parser.add_argument("--file", help="Inventory file path. Defaults to ~/.config/sshman/inventory.yaml.")
     import_parser.add_argument(
         "--on-conflict",
@@ -119,11 +131,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     import_parser.set_defaults(func=cmd_import_inventory)
 
-    template_parser = subparsers.add_parser("template", help="Write or print the YAML inventory template.")
+    template_parser = subparsers.add_parser("gen", aliases=["template"], help="Write the YAML inventory template.")
     template_parser.add_argument("--file", help="Template file path. Defaults to ~/.config/sshman/inventory.yaml.")
     template_parser.set_defaults(func=cmd_template)
 
+    hidden_choices = []
+    for action in subparsers._choices_actions:
+        if action.dest == "__open__":
+            hidden_choices.append(action)
+    for action in hidden_choices:
+        subparsers._choices_actions.remove(action)
+
     return parser
+
+
+PUBLIC_COMMANDS = {
+    "ls",
+    "list",
+    "t",
+    "tunnel",
+    "cp",
+    "copy",
+    "x",
+    "exec",
+    "mv",
+    "rename",
+    "rm",
+    "remove",
+    "doctor",
+    "sync",
+    "import",
+    "gen",
+    "template",
+}
+
+
+def preprocess_argv(argv: list[str]) -> list[str]:
+    if not argv:
+        return ["__open__"]
+    first = argv[0]
+    if first.startswith("-") or first in PUBLIC_COMMANDS:
+        return argv
+    return ["__open__", *argv]
 
 
 def init_config(force: bool = False) -> None:
@@ -217,26 +266,59 @@ def cmd_list(args: argparse.Namespace) -> None:
             print(f"  {tunnel.alias:16} {tunnel.bind_address}:{tunnel.local_port} -> {target} via {tunnel.via}{note}")
 
 
-def cmd_connect(args: argparse.Namespace) -> None:
+def cmd_open(args: argparse.Namespace) -> None:
     ensure_initialized()
     hosts, _ = load_entries()
     if not hosts:
         raise SSHManError("No managed hosts found.")
-    alias = args.alias or choose_alias(hosts, "host")
-    if get_host_by_alias(hosts, alias) is None:
+    alias = args.alias or choose_host_alias(hosts)
+    host = get_host_by_alias(hosts, alias)
+    if host is None:
         raise SSHManError(f"Host alias {alias!r} not found.")
+    start_default_tunnels(alias)
     run_interactive_command(["ssh", alias])
 
 
 def cmd_tunnel(args: argparse.Namespace) -> None:
     ensure_initialized()
-    _, tunnels = load_entries()
+    hosts, tunnels = load_entries()
+    if args.status:
+        show_tunnel_status(hosts, tunnels)
+        return
     if not tunnels:
         raise SSHManError("No managed tunnels found.")
-    alias = args.alias or choose_alias(tunnels, "tunnel")
-    if get_tunnel_by_alias(tunnels, alias) is None:
-        raise SSHManError(f"Tunnel alias {alias!r} not found.")
-    run_interactive_command(["ssh", "-N", alias])
+
+    if not args.alias:
+        alias = choose_tunnel_alias(tunnels, hosts)
+        start_tunnel(alias)
+        return
+
+    host = get_host_by_alias(hosts, args.alias)
+    if host is not None:
+        host_inventory = get_inventory_host(args.alias)
+        if args.all:
+            aliases = [tunnel.alias for tunnel in tunnels if tunnel.via == args.alias]
+            start_tunnels(aliases)
+            return
+        if args.default:
+            aliases = resolve_default_tunnels(args.alias)
+            if not aliases:
+                raise SSHManError(f"Host {args.alias!r} has no default tunnels.")
+            start_tunnels(aliases)
+            return
+        aliases = [tunnel.alias for tunnel in tunnels if tunnel.via == args.alias]
+        if not aliases:
+            raise SSHManError(f"Host {args.alias!r} has no tunnels.")
+        if host_inventory and host_inventory.default_tunnels:
+            start_tunnels(host_inventory.default_tunnels)
+            return
+        alias = choose_tunnel_alias([t for t in tunnels if t.via == args.alias], hosts)
+        start_tunnel(alias)
+        return
+
+    if get_tunnel_by_alias(tunnels, args.alias) is None:
+        raise SSHManError(f"Tunnel alias {args.alias!r} not found.")
+    start_tunnel(args.alias)
 
 
 def cmd_copy(args: argparse.Namespace) -> None:
@@ -497,8 +579,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if not backups_exist():
         warnings.append("No sshman backups found yet. Run `sshman backup` after major changes.")
 
-    if not shutil.which("ssh-copy-id"):
-        warnings.append("ssh-copy-id is not installed; onboarding falls back to plain ssh.")
+    if not shutil.which("fzf"):
+        issues.append("fzf is not installed. sshm 1.0 requires fzf for interactive selection.")
 
     print("Doctor results")
     for issue in issues:
@@ -808,6 +890,9 @@ def capture_check_output() -> dict[str, list[str] | bool]:
     else:
         infos.append("ssh command is available.")
 
+    if shutil.which("fzf"):
+        infos.append("fzf is installed.")
+
     agent_keys = run_command(["ssh-add", "-l"])
     if agent_keys.returncode != 0:
         warnings.append("ssh-agent has no loaded identities or is unavailable.")
@@ -991,35 +1076,45 @@ def run_interactive_command(command: list[str]) -> None:
         raise SSHManError(f"Command failed with exit code {result.returncode}: {' '.join(command)}")
 
 
-def choose_alias(entries: Iterable[HostEntry | TunnelEntry], entry_type: str) -> str:
-    items = list(entries)
-    if shutil.which("fzf"):
-        completed = subprocess.run(
-            ["fzf", "--prompt", f"{entry_type}> "],
-            input="\n".join(entry.alias for entry in items),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        alias = completed.stdout.strip()
-        if completed.returncode == 0 and alias:
-            return alias
-        raise SSHManError(f"No {entry_type} selected.")
+def choose_host_alias(hosts: Iterable[HostEntry]) -> str:
+    items = list(hosts)
+    lines = [
+        f"{host.alias}\t{host.user}@{host.hostname}:{host.port}\t{host.group}\t{host.note or ''}"
+        for host in items
+    ]
+    return fzf_select(lines, "host> ").split("\t", 1)[0]
 
-    print(f"Select a {entry_type}:")
-    for index, entry in enumerate(items, start=1):
-        if isinstance(entry, HostEntry):
-            detail = f"{entry.user}@{entry.hostname}:{entry.port}"
-        else:
-            detail = f"{entry.bind_address}:{entry.local_port} -> {entry.target_host}:{entry.target_port}"
-        print(f"  {index}. {entry.alias} ({detail})")
-    choice = input("> ").strip()
-    if not choice.isdigit():
-        raise SSHManError(f"Invalid {entry_type} selection.")
-    index = int(choice)
-    if index < 1 or index > len(items):
-        raise SSHManError(f"{entry_type.capitalize()} selection out of range.")
-    return items[index - 1].alias
+
+def choose_tunnel_alias(tunnels: Iterable[TunnelEntry], hosts: Iterable[HostEntry]) -> str:
+    host_map = {host.alias: host for host in hosts}
+    items = list(tunnels)
+    lines = []
+    for tunnel in items:
+        via = tunnel.via
+        target = f"{tunnel.bind_address}:{tunnel.local_port} -> {tunnel.target_host}:{tunnel.target_port}"
+        via_host = host_map.get(via)
+        via_text = via
+        if via_host is not None:
+            via_text = f"{via} ({via_host.hostname})"
+        status = tunnel_status_label(tunnel)
+        lines.append(f"{tunnel.alias}\t{via_text}\t{target}\t{status}\t{tunnel.note or ''}")
+    return fzf_select(lines, "tunnel> ").split("\t", 1)[0]
+
+
+def fzf_select(lines: list[str], prompt: str) -> str:
+    if not shutil.which("fzf"):
+        raise SSHManError("fzf is required for sshm interactive selection. Install it first.")
+    completed = subprocess.run(
+        ["fzf", "--prompt", prompt, "--delimiter", "\t", "--with-nth", "1,2,3,4,5"],
+        input="\n".join(lines),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    value = completed.stdout.strip()
+    if completed.returncode == 0 and value:
+        return value
+    raise SSHManError("No selection made.")
 
 
 def split_config_blocks(path: Path) -> list[tuple[list[str], list[str]]]:
@@ -1043,6 +1138,69 @@ def split_config_blocks(path: Path) -> list[tuple[list[str], list[str]]]:
     if current:
         blocks.append((comments, current))
     return blocks
+
+
+def get_inventory_host(alias: str) -> InventoryHost | None:
+    path = resolve_inventory_path(None)
+    if not path.exists():
+        return None
+    for host in load_inventory(path):
+        if host.alias == alias:
+            return host
+    return None
+
+
+def resolve_default_tunnels(host_alias: str) -> list[str]:
+    host = get_inventory_host(host_alias)
+    if host is None:
+        return []
+    return host.default_tunnels
+
+
+def start_default_tunnels(host_alias: str) -> None:
+    aliases = resolve_default_tunnels(host_alias)
+    if aliases:
+        start_tunnels(aliases)
+
+
+def start_tunnel(alias: str) -> None:
+    run_interactive_command(["ssh", "-fN", alias])
+
+
+def start_tunnels(aliases: Iterable[str]) -> None:
+    for alias in aliases:
+        tunnel = get_tunnel_by_alias(load_entries()[1], alias)
+        if tunnel is None:
+            raise SSHManError(f"Tunnel alias {alias!r} not found.")
+        if tunnel_is_running(tunnel):
+            continue
+        start_tunnel(alias)
+
+
+def tunnel_is_running(tunnel: TunnelEntry) -> bool:
+    import socket as socket_module
+
+    target_host = "127.0.0.1" if tunnel.bind_address in {"", "0.0.0.0", "*"} else tunnel.bind_address
+    sock = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+    sock.settimeout(0.2)
+    try:
+        return sock.connect_ex((target_host, tunnel.local_port)) == 0
+    finally:
+        sock.close()
+
+
+def tunnel_status_label(tunnel: TunnelEntry) -> str:
+    return "running" if tunnel_is_running(tunnel) else "stopped"
+
+
+def show_tunnel_status(hosts: list[HostEntry], tunnels: list[TunnelEntry]) -> None:
+    if not tunnels:
+        print("No tunnels")
+        return
+    print("Tunnel status")
+    for tunnel in tunnels:
+        target = f"{tunnel.bind_address}:{tunnel.local_port} -> {tunnel.target_host}:{tunnel.target_port}"
+        print(f"  {tunnel.alias:16} {target:40} {tunnel_status_label(tunnel)} via {tunnel.via}")
 
 
 if __name__ == "__main__":
