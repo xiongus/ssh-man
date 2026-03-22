@@ -7,6 +7,7 @@
 - removed legacy long command names from the public CLI and kept only the short 1.0.1 surface
 - added `sshm edit` and `sshm edit <alias>`
 - upgraded the host selector to use `fzf` preview plus action keys for connect, default tunnels, edit, rename, and delete
+- fixed hidden preview routing so the `fzf` preview pane works correctly
 - tightened `sshm sync` into a full inventory-to-config render instead of incremental import semantics
 - expanded tunnel status to show runtime state and PID when available
 - rewrote the README around the 1.0.1 golden path and selector workflow

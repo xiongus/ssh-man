@@ -150,7 +150,7 @@ def preprocess_argv(argv: list[str]) -> list[str]:
     if not argv:
         return ["__open__"]
     first = argv[0]
-    if first.startswith("-") or first in PUBLIC_COMMANDS:
+    if first.startswith("-") or first.startswith("__") or first in PUBLIC_COMMANDS:
         return argv
     return ["__open__", *argv]
 
