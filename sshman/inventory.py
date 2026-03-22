@@ -73,7 +73,10 @@ def load_inventory(path: Path) -> list[InventoryHost]:
                 )
             )
         tunnel_aliases = {tunnel.alias for tunnel in host.tunnels}
-        missing_defaults = [alias for alias in host.default_tunnels if alias not in tunnel_aliases]
+        wildcard_defaults = [alias for alias in host.default_tunnels if alias == "*"]
+        if wildcard_defaults and len(host.default_tunnels) > 1:
+            raise InventoryError(f"Host {host.alias} cannot mix '*' with explicit default_tunnels.")
+        missing_defaults = [alias for alias in host.default_tunnels if alias != "*" and alias not in tunnel_aliases]
         if missing_defaults:
             raise InventoryError(
                 f"Host {host.alias} default_tunnels reference missing tunnels: {', '.join(missing_defaults)}"

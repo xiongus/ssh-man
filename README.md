@@ -1,8 +1,8 @@
-# SSHMan 1.0.1
+# SSHMan 1.0.2
 
 Terminal-first SSH inventory manager for macOS/Linux.
 
-## 1.0.1 Principles
+## 1.0.2 Principles
 
 - one source of truth: `~/.config/sshman/inventory.yaml`
 - one primary entrypoint: `sshm`
@@ -63,11 +63,13 @@ Daily usage:
 
 ```bash
 sshm
+sshm prod
 sshm jump-box
 sshm edit jump-box
 sshm t
 sshm t jump-box --default
 sshm t --status
+sshm t --status --watch
 sshm doctor
 ```
 
@@ -75,6 +77,8 @@ sshm doctor
 
 - `sshm`
   Open the host selector
+- `sshm <query>`
+  Pre-fill `fzf` with a query; if one host matches, connect directly
 - `sshm <alias>`
   Connect directly to one host and start its default tunnels first
 - `sshm ls`
@@ -86,21 +90,25 @@ sshm doctor
 - `sshm t <host> --all`
   Start all tunnels under one host
 - `sshm t --status`
-  Show tunnel runtime status with PID when available
+  Show colored tunnel runtime status
+- `sshm t --status --watch`
+  Refresh the status table continuously
 - `sshm edit`
-  Open the default inventory
+  Open the default inventory and prompt to sync if it changed
 - `sshm edit <alias>`
   Open the inventory and jump near that host
-- `sshm mv`
-  Rename a host or tunnel in inventory, then sync
-- `sshm rm`
-  Remove a host or tunnel from inventory, then sync
+- `sshm backup list`
+  Show saved inventory backups
+- `sshm backup restore <timestamp>`
+  Restore one inventory backup and sync it
+- `sshm completion zsh|bash|fish`
+  Print shell completion scripts
 - `sshm sync`
   Render inventory into `~/.ssh/config.d`
 - `sshm gen`
   Write the default inventory template
 - `sshm doctor`
-  Validate `fzf`, inventory, and managed SSH state
+  Validate `fzf`, inventory, backups, and managed SSH state
 
 ## Selector UX
 
@@ -109,7 +117,9 @@ sshm doctor
 Host selector keys:
 
 - `Enter`
-  Connect
+  Connect the selected host, or open all selected hosts if you multi-select
+- `Tab`
+  Multi-select hosts
 - `Ctrl-T`
   Start the selected host's default tunnels
 - `Ctrl-E`
@@ -118,6 +128,8 @@ Host selector keys:
   Rename the selected host
 - `Ctrl-D`
   Delete the selected host after confirmation
+- `Ctrl-P`
+  Probe the selected host and refresh preview reachability
 - `Ctrl-/`
   Toggle preview
 
@@ -130,7 +142,8 @@ The preview pane shows:
 - proxy jump
 - identity file
 - default tunnels
-- tunnel summaries and runtime state
+- reachability result from `Ctrl-P`
+- tunnel runtime state, PID, and uptime
 
 ## Inventory
 
@@ -164,12 +177,106 @@ hosts:
         note: Main DB
 ```
 
+Wildcard defaults are supported:
+
+```yaml
+default_tunnels:
+  - "*"
+```
+
+That means "start every tunnel under this host" and only applies when you explicitly write `*`.
+
 Notes:
 
 - `password:` is optional
 - passwords are only used when you explicitly run `sshm sync --use-passwords`
 - if you use password-assisted bootstrap, `sshpass` must be installed
-- `default_tunnels` must reference tunnels defined under the same host
+- `default_tunnels` must either reference real tunnel aliases or be exactly `["*"]`
+
+## Edit And Sync
+
+By default, `sshm edit` compares the inventory before and after your editor exits.
+
+If it changed, SSHMan asks:
+
+```text
+Inventory changed. Sync now? [Y/n/always/never]
+```
+
+You can control this with:
+
+- `--no-prompt`
+- `SSHMAN_AUTO_SYNC_PROMPT=always`
+- `SSHMAN_AUTO_SYNC_PROMPT=never`
+
+## Tunnel Status
+
+`sshm t --status` shows:
+
+- alias
+- local bind and target
+- status
+- PID
+- uptime
+- via host
+- note
+
+Useful flags:
+
+```bash
+sshm t --status --running
+sshm t --status --dead
+sshm t --status --watch
+sshm t --status --watch --watch-interval 2
+```
+
+## Backups
+
+Every `sshm sync` creates an inventory backup at:
+
+```bash
+~/.config/sshman/backup/
+```
+
+Backups are timestamped and only the newest 30 are kept by default.
+
+Useful knobs:
+
+- `SSHMAN_BACKUP_KEEP=50`
+- `SSHMAN_BACKUP_ENABLED=false`
+
+Commands:
+
+```bash
+sshm backup list
+sshm backup restore 20260322-120000
+```
+
+## Query And Probe Behavior
+
+Useful knobs:
+
+- `SSHMAN_SINGLE_MATCH_CONNECT=0`
+  Always open `fzf`, even if one host matches
+- `SSHMAN_PROBE_METHOD=tcp|ping|ssh`
+- `SSHMAN_PROBE_TIMEOUT=3`
+- `SSHMAN_WATCH_INTERVAL=4`
+
+## Shell Completion
+
+Print a completion script:
+
+```bash
+sshm completion zsh
+sshm completion bash
+sshm completion fish
+```
+
+Example for `zsh`:
+
+```bash
+sshm completion zsh > ~/.zsh/completions/_sshm
+```
 
 ## SSH Config Behavior
 
