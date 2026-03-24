@@ -33,7 +33,7 @@ INCLUDE_LINE = "Include ~/.ssh/config.d/*.conf"
 ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 HOST_PREVIEW_LINE = "{alias}\t{user}@{host}:{port}\t{group}\t{note}"
 TUNNEL_PREVIEW_LINE = "{alias}\t{via}\t{mapping}\t{status}\t{note}"
-HOST_SELECTOR_KEYS = "enter,ctrl-t,ctrl-e,ctrl-r,ctrl-d,ctrl-p"
+HOST_SELECTOR_KEYS = "ctrl-t,ctrl-e,ctrl-r,ctrl-d,ctrl-p"
 TUNNEL_SELECTOR_KEYS = "enter"
 STATUS_RUNNING = "running"
 STATUS_STOPPED = "stopped"
@@ -816,9 +816,24 @@ def fzf_select(
     output_lines = completed.stdout.splitlines()
     if len(output_lines) < 2:
         raise SSHManError("No selection made.")
-    key = output_lines[0].strip()
-    query = output_lines[1]
-    selected_rows = [line for line in output_lines[2:] if line.strip()]
+    expected = {item.strip() for item in expect_keys.split(",") if item.strip()}
+
+    key = "enter"
+    query = ""
+    selected_rows: list[str] = []
+
+    if output_lines[0].strip() in expected:
+        key = output_lines[0].strip()
+        query = output_lines[1] if len(output_lines) > 1 else ""
+        selected_rows = [line for line in output_lines[2:] if line.strip()]
+    elif len(output_lines) > 1 and output_lines[1].strip() in expected:
+        query = output_lines[0]
+        key = output_lines[1].strip()
+        selected_rows = [line for line in output_lines[2:] if line.strip()]
+    else:
+        query = output_lines[0]
+        selected_rows = [line for line in output_lines[1:] if line.strip()]
+
     if not selected_rows:
         raise SSHManError("No selection made.")
     return key, query, selected_rows

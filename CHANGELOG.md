@@ -4,6 +4,7 @@
 
 - added query-driven entry so `sshm <query>` can prefill the selector or connect directly on a single match
 - stabilized host selector enter behavior around single-selection
+- fixed `fzf` enter parsing so filtered selections connect the highlighted host reliably
 - added `sshm edit` change detection with a sync prompt after editing
 - upgraded tunnel status with color, uptime, PID, `--running`, `--dead`, and `--watch`
 - added `Ctrl-P` reachability probes in the host selector preview
