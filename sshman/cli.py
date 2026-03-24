@@ -531,9 +531,19 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
     validate_inventory_state(inventory_hosts)
     backup_inventory_file(path)
 
+    password_hosts = [host for host in inventory_hosts if host.password]
+    if password_hosts and not use_passwords:
+        print(
+            "Warning: inventory contains password fields, but sync ran without --use-passwords; "
+            "password bootstrap was skipped.",
+            file=sys.stderr,
+        )
+
     if use_passwords:
-        for host in inventory_hosts:
-            if host.password:
+        bootstrap_failures: list[str] = []
+        bootstrap_successes: list[str] = []
+        for host in password_hosts:
+            try:
                 identity_file = host.identity_file or DEFAULT_IDENTITY
                 identity_path = ensure_local_key(identity_file, None)
                 public_key_path = public_key_for(identity_path)
@@ -544,6 +554,7 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
                     public_key_path=public_key_path,
                     proxy_jump=host.proxy_jump,
                     password=host.password,
+                    alias=host.alias,
                 )
                 verify_key_login(
                     hostname=host.host,
@@ -552,6 +563,10 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
                     identity_file=identity_path,
                     proxy_jump=host.proxy_jump,
                 )
+                bootstrap_successes.append(host.alias)
+                print(f"Bootstrapped key auth for {host.alias} ({host.user}@{host.host}:{host.port})")
+            except SSHManError as exc:
+                bootstrap_failures.append(f"{host.alias}: {exc}")
 
     managed_hosts = [
         HostEntry(
@@ -584,6 +599,10 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
     rewrite_hosts_file(managed_hosts)
     rewrite_tunnels_file(managed_tunnels, managed_hosts)
     ensure_permissions()
+    if use_passwords and bootstrap_failures:
+        if bootstrap_successes:
+            print("Key bootstrap succeeded for: " + ", ".join(bootstrap_successes))
+        raise SSHManError("Key bootstrap failed for: " + " | ".join(bootstrap_failures))
     prune_inventory_backups(ensure_app_backup_dir())
     return len(managed_hosts), len(managed_tunnels)
 
@@ -666,43 +685,35 @@ def interactive_host_selector(inventory_hosts: list[InventoryHost], initial_quer
             inventory_hosts = load_inventory_state()
             if not inventory_hosts:
                 raise SSHManError("No hosts defined in inventory.")
-            action, query, aliases = choose_host_action(inventory_hosts, query, state_path)
-            if not aliases:
+            action, query, alias = choose_host_action(inventory_hosts, query, state_path)
+            if not alias:
                 raise SSHManError("No selection made.")
             if action in {"", "enter"}:
-                if len(aliases) == 1:
-                    connect_host(aliases[0])
-                    return
-                open_multiple_hosts(aliases)
+                connect_host(alias)
                 return
             if action == "ctrl-t":
-                selected_hosts = [require_inventory_host(inventory_hosts, alias) for alias in aliases]
-                for host in selected_hosts:
-                    default_tunnels = resolve_default_inventory_tunnels(host)
-                    if default_tunnels:
-                        start_inventory_tunnels(default_tunnels)
+                host = require_inventory_host(inventory_hosts, alias)
+                default_tunnels = resolve_default_inventory_tunnels(host)
+                if default_tunnels:
+                    start_inventory_tunnels(default_tunnels)
                 continue
             if action == "ctrl-e":
-                cmd_edit(argparse.Namespace(alias=aliases[0], no_prompt=False))
+                cmd_edit(argparse.Namespace(alias=alias, no_prompt=False))
                 continue
             if action == "ctrl-r":
-                if len(aliases) != 1:
-                    print("Rename only supports one host at a time.", file=sys.stderr)
-                    continue
                 new_alias = prompt("New alias: ").strip()
                 if not new_alias:
                     continue
-                cmd_rename(argparse.Namespace(old_alias=aliases[0], new_alias=new_alias))
+                cmd_rename(argparse.Namespace(old_alias=alias, new_alias=new_alias))
                 query = new_alias
                 continue
             if action == "ctrl-d":
-                confirm = prompt(f"Delete {', '.join(aliases)}? [y/N] ").strip().lower()
+                confirm = prompt(f"Delete {alias}? [y/N] ").strip().lower()
                 if confirm in {"y", "yes"}:
-                    for alias in aliases:
-                        cmd_remove(argparse.Namespace(alias=alias))
+                    cmd_remove(argparse.Namespace(alias=alias))
                 continue
             if action == "ctrl-p":
-                record_probe_result(require_inventory_host(inventory_hosts, aliases[0]), state_path)
+                record_probe_result(require_inventory_host(inventory_hosts, alias), state_path)
                 continue
     finally:
         cleanup_selector_state_file(state_path)
@@ -713,7 +724,7 @@ def interactive_tunnel_selector(inventory_hosts: list[InventoryHost], initial_qu
     start_tunnels_by_aliases(aliases)
 
 
-def choose_host_action(hosts: list[InventoryHost], initial_query: str, state_path: Path) -> tuple[str, str, list[str]]:
+def choose_host_action(hosts: list[InventoryHost], initial_query: str, state_path: Path) -> tuple[str, str, str]:
     rows = [
         HOST_PREVIEW_LINE.format(
             alias=host.alias,
@@ -731,10 +742,9 @@ def choose_host_action(hosts: list[InventoryHost], initial_query: str, state_pat
         preview_command=build_preview_command("host"),
         expect_keys=HOST_SELECTOR_KEYS,
         initial_query=initial_query,
-        multi=True,
         env=preview_env(state_path),
     )
-    return key, query, [row.split("\t", 1)[0] for row in rows]
+    return key, query, rows[0].split("\t", 1)[0]
 
 
 def choose_tunnel_aliases(hosts: list[InventoryHost], initial_query: str = "") -> list[str]:
@@ -1410,6 +1420,7 @@ def deploy_public_key(
     port: int,
     public_key_path: Path,
     proxy_jump: str | None,
+    alias: str | None = None,
     password: str | None = None,
 ) -> None:
     ssh_copy_id = shutil.which("ssh-copy-id")
@@ -1422,7 +1433,8 @@ def deploy_public_key(
             command = with_sshpass(command, password)
         result = subprocess.run(command, check=False)
         if result.returncode != 0:
-            raise SSHManError("ssh-copy-id failed while deploying the public key.")
+            target = f"{alias or user}@{hostname}:{port}"
+            raise SSHManError(f"ssh-copy-id failed while deploying the public key to {target}.")
         return
 
     public_key = public_key_path.read_text(encoding="utf-8").strip()
@@ -1440,7 +1452,8 @@ def deploy_public_key(
         command = with_sshpass(command, password)
     result = subprocess.run(command, env=env, check=False)
     if result.returncode != 0:
-        raise SSHManError("ssh fallback failed while deploying the public key.")
+        target = f"{alias or user}@{hostname}:{port}"
+        raise SSHManError(f"ssh fallback failed while deploying the public key to {target}.")
 
 
 def with_sshpass(command: list[str], password: str) -> list[str]:

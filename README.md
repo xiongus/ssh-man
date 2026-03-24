@@ -59,6 +59,12 @@ Render inventory into SSH config:
 sshm sync
 ```
 
+If you want inventory passwords to be used for one-time key bootstrap, run:
+
+```bash
+sshm sync --use-passwords
+```
+
 Daily usage:
 
 ```bash
@@ -189,7 +195,7 @@ That means "start every tunnel under this host" and only applies when you explic
 Notes:
 
 - `password:` is optional
-- passwords are only used when you explicitly run `sshm sync --use-passwords`
+- passwords are ignored by plain `sshm sync` and only used when you explicitly run `sshm sync --use-passwords`
 - if you use password-assisted bootstrap, `sshpass` must be installed
 - `default_tunnels` must either reference real tunnel aliases or be exactly `["*"]`
 

@@ -3,11 +3,13 @@
 ## 1.0.2
 
 - added query-driven entry so `sshm <query>` can prefill the selector or connect directly on a single match
+- stabilized host selector enter behavior around single-selection
 - added `sshm edit` change detection with a sync prompt after editing
 - upgraded tunnel status with color, uptime, PID, `--running`, `--dead`, and `--watch`
 - added `Ctrl-P` reachability probes in the host selector preview
 - added support for `default_tunnels: ["*"]`
 - added automatic inventory backups before every `sshm sync`
+- improved `--use-passwords` reporting so bootstrap successes and failures are reported per host
 - added `sshm backup list` and `sshm backup restore <timestamp>`
 - added `sshm completion zsh|bash|fish`
 - expanded selector behavior to support multi-select host and tunnel actions
