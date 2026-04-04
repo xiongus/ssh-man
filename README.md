@@ -196,6 +196,7 @@ Notes:
 
 - `password:` is optional
 - passwords are ignored by plain `sshm sync` and only used when you explicitly run `sshm sync --use-passwords`
+- `sshm sync --use-passwords` now skips hosts that already have working key-based login, and caches successful bootstrap state under `~/.config/sshman/bootstrap-state.json`
 - if you use password-assisted bootstrap, `sshpass` must be installed
 - `default_tunnels` must either reference real tunnel aliases or be exactly `["*"]`
 

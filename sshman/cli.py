@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -26,6 +28,7 @@ TUNNELS_PATH = CONFIG_D_DIR / "tunnels.conf"
 SSH_BACKUPS_DIR = SSH_DIR / "backups"
 APP_CONFIG_DIR = Path.home() / ".config" / "sshman"
 APP_BACKUP_DIR = APP_CONFIG_DIR / "backup"
+BOOTSTRAP_STATE_PATH = APP_CONFIG_DIR / "bootstrap-state.json"
 DEFAULT_INVENTORY_PATH = APP_CONFIG_DIR / "inventory.yaml"
 DEFAULT_IDENTITY = "~/.ssh/id_ed25519"
 MANAGED_HEADER = "# Managed by sshman. Manual edits are allowed.\n"
@@ -542,11 +545,33 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
     if use_passwords:
         bootstrap_failures: list[str] = []
         bootstrap_successes: list[str] = []
+        bootstrap_skips: list[str] = []
+        bootstrap_state = load_bootstrap_state()
+        seen_bootstrap_aliases: set[str] = set()
         for host in password_hosts:
+            seen_bootstrap_aliases.add(host.alias)
             try:
                 identity_file = host.identity_file or DEFAULT_IDENTITY
                 identity_path = ensure_local_key(identity_file, None)
                 public_key_path = public_key_for(identity_path)
+                fingerprint = bootstrap_fingerprint(host, public_key_path)
+                existing = bootstrap_state.get(host.alias)
+                if existing and existing.get("fingerprint") == fingerprint and existing.get("status") == "success":
+                    bootstrap_skips.append(host.alias)
+                    print(f"Skipping key bootstrap for {host.alias} (already recorded).")
+                    continue
+                key_login_ok, _ = check_key_login(
+                    hostname=host.host,
+                    user=host.user,
+                    port=host.port,
+                    identity_file=identity_path,
+                    proxy_jump=host.proxy_jump,
+                )
+                if key_login_ok:
+                    bootstrap_state[host.alias] = bootstrap_state_record(fingerprint)
+                    bootstrap_skips.append(host.alias)
+                    print(f"Skipping key bootstrap for {host.alias} (passwordless login already works).")
+                    continue
                 deploy_public_key(
                     hostname=host.host,
                     user=host.user,
@@ -563,10 +588,14 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
                     identity_file=identity_path,
                     proxy_jump=host.proxy_jump,
                 )
+                bootstrap_state[host.alias] = bootstrap_state_record(fingerprint)
                 bootstrap_successes.append(host.alias)
                 print(f"Bootstrapped key auth for {host.alias} ({host.user}@{host.host}:{host.port})")
             except SSHManError as exc:
+                bootstrap_state.pop(host.alias, None)
                 bootstrap_failures.append(f"{host.alias}: {exc}")
+        prune_bootstrap_state(bootstrap_state, seen_bootstrap_aliases)
+        save_bootstrap_state(bootstrap_state)
 
     managed_hosts = [
         HostEntry(
@@ -602,7 +631,11 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
     if use_passwords and bootstrap_failures:
         if bootstrap_successes:
             print("Key bootstrap succeeded for: " + ", ".join(bootstrap_successes))
+        if bootstrap_skips:
+            print("Key bootstrap skipped for: " + ", ".join(bootstrap_skips))
         raise SSHManError("Key bootstrap failed for: " + " | ".join(bootstrap_failures))
+    if use_passwords and bootstrap_skips:
+        print("Key bootstrap skipped for: " + ", ".join(bootstrap_skips))
     prune_inventory_backups(ensure_app_backup_dir())
     return len(managed_hosts), len(managed_tunnels)
 
@@ -1366,6 +1399,54 @@ def ensure_app_backup_dir() -> Path:
     return APP_BACKUP_DIR
 
 
+def load_bootstrap_state() -> dict[str, dict[str, str]]:
+    if not BOOTSTRAP_STATE_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(BOOTSTRAP_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(
+            f"Warning: ignoring unreadable bootstrap state file: {BOOTSTRAP_STATE_PATH}",
+            file=sys.stderr,
+        )
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    state: dict[str, dict[str, str]] = {}
+    for alias, value in raw.items():
+        if isinstance(alias, str) and isinstance(value, dict):
+            state[alias] = {str(key): str(item) for key, item in value.items()}
+    return state
+
+
+def save_bootstrap_state(state: dict[str, dict[str, str]]) -> None:
+    APP_CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    BOOTSTRAP_STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def prune_bootstrap_state(state: dict[str, dict[str, str]], aliases: set[str]) -> None:
+    for alias in list(state):
+        if alias not in aliases:
+            state.pop(alias, None)
+
+
+def bootstrap_fingerprint(host: InventoryHost, public_key_path: Path) -> str:
+    public_key = public_key_path.read_text(encoding="utf-8").strip()
+    digest = hashlib.sha256()
+    for value in (host.host, host.user, str(host.port), host.proxy_jump or "", public_key):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def bootstrap_state_record(fingerprint: str) -> dict[str, str]:
+    return {
+        "fingerprint": fingerprint,
+        "status": "success",
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
 def prune_inventory_backups(backup_dir: Path) -> None:
     keep = backup_keep_count()
     backups = list_inventory_backups(backup_dir)
@@ -1446,10 +1527,12 @@ def deploy_public_key(
         command.append(f"{user}@{hostname}")
         if password:
             command = with_sshpass(command, password)
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             target = f"{alias or user}@{hostname}:{port}"
-            raise SSHManError(f"ssh-copy-id failed while deploying the public key to {target}.")
+            detail = summarize_process_failure(result)
+            suffix = f": {detail}" if detail else "."
+            raise SSHManError(f"ssh-copy-id failed while deploying the public key to {target}{suffix}")
         return
 
     public_key = public_key_path.read_text(encoding="utf-8").strip()
@@ -1465,10 +1548,12 @@ def deploy_public_key(
     env["KEY"] = public_key
     if password:
         command = with_sshpass(command, password)
-    result = subprocess.run(command, env=env, check=False)
+    result = subprocess.run(command, env=env, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         target = f"{alias or user}@{hostname}:{port}"
-        raise SSHManError(f"ssh fallback failed while deploying the public key to {target}.")
+        detail = summarize_process_failure(result)
+        suffix = f": {detail}" if detail else "."
+        raise SSHManError(f"ssh fallback failed while deploying the public key to {target}{suffix}")
 
 
 def with_sshpass(command: list[str], password: str) -> list[str]:
@@ -1489,6 +1574,31 @@ def verify_key_login(
     identity_file: Path,
     proxy_jump: str | None,
 ) -> None:
+    ok, detail = check_key_login(
+        hostname=hostname,
+        user=user,
+        port=port,
+        identity_file=identity_file,
+        proxy_jump=proxy_jump,
+    )
+    if ok:
+        return
+    extra = f" Detail: {detail}" if detail else ""
+    raise SSHManError(
+        "Public key deployment finished, but passwordless login verification failed. "
+        "Check remote authorized_keys permissions and sshd settings."
+        + extra
+    )
+
+
+def check_key_login(
+    *,
+    hostname: str,
+    user: str,
+    port: int,
+    identity_file: Path,
+    proxy_jump: str | None,
+) -> tuple[bool, str | None]:
     command = [
         "ssh",
         "-o",
@@ -1504,11 +1614,20 @@ def verify_key_login(
         command.extend(["-J", proxy_jump])
     command.extend([f"{user}@{hostname}", "exit"])
     result = subprocess.run(command, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise SSHManError(
-            "Public key deployment finished, but passwordless login verification failed. "
-            "Check remote authorized_keys permissions and sshd settings."
-        )
+    if result.returncode == 0:
+        return True, None
+    return False, summarize_process_failure(result)
+
+
+def summarize_process_failure(result: subprocess.CompletedProcess[str]) -> str | None:
+    for stream in (result.stderr, result.stdout):
+        text = (stream or "").strip()
+        if not text:
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return lines[-1]
+    return None
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
