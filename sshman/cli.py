@@ -100,13 +100,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     tunnel_parser = subparsers.add_parser("t", help="Start tunnels or inspect tunnel status.")
     tunnel_parser.add_argument("alias", nargs="?")
-    tunnel_parser.add_argument("--all", action="store_true", help="Start all tunnels for a host.")
-    tunnel_parser.add_argument("--default", action="store_true", help="Start only a host's default tunnels.")
+    tunnel_parser.add_argument("--all", action="store_true", help="Apply to all tunnels for a host.")
+    tunnel_parser.add_argument("--default", action="store_true", help="Apply only to a host's default tunnels.")
+    tunnel_parser.add_argument("--start", action="store_true", help="Start tunnels. This is the default action.")
     tunnel_parser.add_argument("--status", action="store_true", help="Show tunnel runtime status.")
     tunnel_parser.add_argument("--watch", action="store_true", help="Refresh tunnel status continuously.")
     tunnel_parser.add_argument("--watch-interval", type=float, default=watch_interval_default())
     tunnel_parser.add_argument("--running", action="store_true", help="Only show running tunnels.")
     tunnel_parser.add_argument("--dead", action="store_true", help="Only show stopped or errored tunnels.")
+    tunnel_parser.add_argument("--stop", action="store_true", help="Stop tunnels by killing their managed SSH listeners.")
     tunnel_parser.set_defaults(func=cmd_tunnel)
 
     copy_parser = subparsers.add_parser("cp", help="Copy files to or from a managed host.")
@@ -266,6 +268,8 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_tunnel(args: argparse.Namespace) -> None:
     inventory_hosts = load_inventory_state()
+    if args.start and args.stop:
+        raise SSHManError("Use either --start or --stop, not both.")
     if args.status:
         show_tunnel_status(
             inventory_hosts,
@@ -280,6 +284,9 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     if args.alias:
         host = find_inventory_host(inventory_hosts, args.alias)
         if host is not None:
+            if args.stop:
+                stop_inventory_tunnels(resolve_requested_host_tunnels(host, all_tunnels=args.all, default_only=args.default))
+                return
             if args.all:
                 start_inventory_tunnels(host.tunnels)
                 return
@@ -301,8 +308,14 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
         tunnel_host, tunnel = find_inventory_tunnel(inventory_hosts, args.alias)
         if tunnel_host is None or tunnel is None:
             raise SSHManError(f"Tunnel alias {args.alias!r} not found.")
+        if args.stop:
+            stop_tunnel(tunnel)
+            return
         start_tunnel_by_alias(tunnel.alias)
         return
+
+    if args.stop:
+        raise SSHManError("Specify a host or tunnel alias to stop.")
 
     ensure_fzf_installed()
     interactive_tunnel_selector(inventory_hosts)
@@ -622,6 +635,7 @@ def sync_inventory(path: Path, use_passwords: bool) -> tuple[int, int]:
         )
         for host in inventory_hosts
         for tunnel in host.tunnels
+        if not tunnel.command
     ]
 
     backup_paths()
@@ -662,6 +676,12 @@ def validate_inventory_state(hosts: list[InventoryHost]) -> None:
             validate_alias(tunnel.alias)
             validate_port(tunnel.local_port)
             validate_port(tunnel.target_port)
+            if tunnel.remote_cleanup_port is not None:
+                validate_port(tunnel.remote_cleanup_port)
+            if bool(tunnel.remote_cleanup_host) != (tunnel.remote_cleanup_port is not None):
+                raise SSHManError(
+                    f"Tunnel {tunnel.alias} must set both remote_cleanup_host and remote_cleanup_port."
+                )
             if tunnel.alias in aliases:
                 raise SSHManError(f"Duplicate alias in inventory: {tunnel.alias}")
             if tunnel.local_port in local_ports:
@@ -917,6 +937,8 @@ def render_tunnel_preview(host: InventoryHost, tunnel: InventoryTunnel) -> str:
         f"via: {host.alias} ({host.user}@{host.host}:{host.port})",
         f"mapping: {tunnel.bind_address}:{tunnel.local_port} -> {tunnel.target_host}:{tunnel.target_port}",
         f"note: {tunnel.note or '-'}",
+        f"command: {tunnel.command or '-'}",
+        f"remote cleanup: {render_remote_cleanup_label(tunnel)}",
         f"status: {runtime['status']}",
         f"pid: {runtime['pid'] or '-'}",
         f"uptime: {runtime['uptime'] or '-'}",
@@ -1020,6 +1042,18 @@ def start_default_tunnels_for_host(host: InventoryHost) -> None:
         start_inventory_tunnels(default_tunnels)
 
 
+def resolve_requested_host_tunnels(host: InventoryHost, *, all_tunnels: bool, default_only: bool) -> list[InventoryTunnel]:
+    if all_tunnels:
+        return list(host.tunnels)
+    if default_only:
+        default_tunnels = resolve_default_inventory_tunnels(host)
+        if not default_tunnels:
+            raise SSHManError(f"Host {host.alias!r} has no default tunnels.")
+        return default_tunnels
+    default_tunnels = resolve_default_inventory_tunnels(host)
+    return default_tunnels or list(host.tunnels)
+
+
 def start_inventory_tunnels(tunnels: list[InventoryTunnel]) -> None:
     for tunnel in tunnels:
         if tunnel_is_running(tunnel):
@@ -1034,7 +1068,95 @@ def start_tunnels_by_aliases(aliases: Iterable[str]) -> None:
 
 def start_tunnel_by_alias(alias: str) -> None:
     ensure_runtime_ready()
+    _host, tunnel = find_inventory_tunnel(load_inventory_state(), alias)
+    if tunnel and tunnel.command:
+        run_interactive_command(shlex.split(tunnel.command))
+        return
     run_interactive_command(["ssh", "-fN", alias])
+
+
+def stop_inventory_tunnels(tunnels: list[InventoryTunnel]) -> None:
+    for tunnel in tunnels:
+        stop_tunnel(tunnel)
+
+
+def stop_tunnel(tunnel: InventoryTunnel) -> None:
+    stopped_local = stop_local_tunnel_listener(tunnel)
+    stopped_remote = stop_remote_tunnel_listener(tunnel)
+    if stopped_local or stopped_remote:
+        return
+    print(f"Tunnel {tunnel.alias} is not running.")
+
+
+def stop_local_tunnel_listener(tunnel: InventoryTunnel) -> bool:
+    pid = find_listener_pid(tunnel.local_port)
+    if not pid:
+        return False
+    ensure_ssh_process(pid, f"local port {tunnel.local_port}")
+    result = run_command(["kill", pid])
+    if result.returncode != 0:
+        raise SSHManError(f"Failed to stop local tunnel {tunnel.alias}: {summarize_process_failure(result) or result.stderr}")
+    print(f"Stopped local tunnel {tunnel.alias} on port {tunnel.local_port} (pid {pid}).")
+    return True
+
+
+def stop_remote_tunnel_listener(tunnel: InventoryTunnel) -> bool:
+    if not tunnel.remote_cleanup_host and tunnel.remote_cleanup_port is None:
+        return False
+    if not tunnel.remote_cleanup_host or tunnel.remote_cleanup_port is None:
+        raise SSHManError(
+            f"Tunnel {tunnel.alias} must set both remote_cleanup_host and remote_cleanup_port for remote cleanup."
+        )
+    validate_port(tunnel.remote_cleanup_port)
+    script = build_remote_cleanup_script(tunnel.remote_cleanup_port)
+    result = run_command(["ssh", tunnel.remote_cleanup_host, script])
+    if result.returncode != 0:
+        detail = summarize_process_failure(result) or result.stderr
+        raise SSHManError(f"Failed to stop remote tunnel {tunnel.alias} on {tunnel.remote_cleanup_host}: {detail}")
+    stopped = "stopped" in result.stdout.splitlines()
+    if stopped:
+        print(
+            f"Stopped remote tunnel {tunnel.alias} on "
+            f"{tunnel.remote_cleanup_host}:{tunnel.remote_cleanup_port}."
+        )
+    return stopped
+
+
+def build_remote_cleanup_script(port: int) -> str:
+    return (
+        f"pids=$(lsof -tiTCP:{port} -sTCP:LISTEN 2>/dev/null || true); "
+        "[ -z \"$pids\" ] && exit 0; "
+        "for pid in $pids; do "
+        "comm=$(ps -p \"$pid\" -o comm= 2>/dev/null || true); "
+        "case \"$comm\" in ssh|*/ssh) kill \"$pid\" && echo stopped ;; "
+        "*) echo \"refusing to kill non-ssh listener pid $pid ($comm)\" >&2; exit 2 ;; "
+        "esac; "
+        "done"
+    )
+
+
+def ensure_ssh_process(pid: str, label: str) -> None:
+    command_name = process_command_name(pid)
+    if command_name is None:
+        raise SSHManError(f"Cannot inspect process {pid} for {label}.")
+    if Path(command_name).name != "ssh":
+        raise SSHManError(f"Refusing to kill non-ssh process {pid} ({command_name}) for {label}.")
+
+
+def process_command_name(pid: str) -> str | None:
+    completed = run_command(["ps", "-p", pid, "-o", "comm="])
+    if completed.returncode != 0:
+        return None
+    command_name = completed.stdout.strip()
+    return command_name or None
+
+
+def render_remote_cleanup_label(tunnel: InventoryTunnel) -> str:
+    if not tunnel.remote_cleanup_host and tunnel.remote_cleanup_port is None:
+        return "-"
+    if not tunnel.remote_cleanup_host or tunnel.remote_cleanup_port is None:
+        return "invalid"
+    return f"{tunnel.remote_cleanup_host}:{tunnel.remote_cleanup_port}"
 
 
 def flatten_inventory_tunnels(hosts: list[InventoryHost]) -> list[tuple[InventoryHost, InventoryTunnel]]:
@@ -1794,7 +1916,7 @@ def render_bash_completion(program: str) -> str:
     return
   fi
   if [[ $prev == t ]]; then
-    COMPREPLY=( $(compgen -W "$({program} __complete_aliases__ host 2>/dev/null) $({program} __complete_aliases__ tunnel 2>/dev/null) --all --default --status --watch --watch-interval --running --dead" -- "$cur") )
+    COMPREPLY=( $(compgen -W "$({program} __complete_aliases__ host 2>/dev/null) $({program} __complete_aliases__ tunnel 2>/dev/null) --all --default --start --status --watch --watch-interval --running --dead --stop" -- "$cur") )
     return
   fi
 }}
@@ -1826,10 +1948,12 @@ def render_fish_completion(program: str) -> str:
     return f"""complete -c {program} -f
 complete -c {program} -n '__fish_use_subcommand' -a '({program} __complete_aliases__ host 2>/dev/null) ls t cp x mv rm edit backup completion doctor sync gen'
 complete -c {program} -n '__fish_seen_subcommand_from t' -a '({program} __complete_aliases__ host 2>/dev/null) ({program} __complete_aliases__ tunnel 2>/dev/null)'
+complete -c {program} -n '__fish_seen_subcommand_from t' -l start
 complete -c {program} -n '__fish_seen_subcommand_from t' -l status
 complete -c {program} -n '__fish_seen_subcommand_from t' -l watch
 complete -c {program} -n '__fish_seen_subcommand_from t' -l running
 complete -c {program} -n '__fish_seen_subcommand_from t' -l dead
+complete -c {program} -n '__fish_seen_subcommand_from t' -l stop
 """
 
 

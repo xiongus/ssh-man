@@ -70,6 +70,9 @@ def load_inventory(path: Path) -> list[InventoryHost]:
                     target_port=required_int(tunnel_item, "target_port"),
                     bind_address=optional_str(tunnel_item, "bind_address", "127.0.0.1"),
                     note=nullable_str(tunnel_item, "note"),
+                    command=nullable_str(tunnel_item, "command"),
+                    remote_cleanup_host=nullable_str(tunnel_item, "remote_cleanup_host"),
+                    remote_cleanup_port=nullable_int(tunnel_item, "remote_cleanup_port"),
                 )
             )
         tunnel_aliases = {tunnel.alias for tunnel in host.tunnels}
@@ -128,6 +131,12 @@ def render_inventory(hosts: list[InventoryHost]) -> str:
                         "        note: " + render_nullable(tunnel.note),
                     ]
                 )
+                if tunnel.command:
+                    lines.append("        command: " + render_scalar(tunnel.command))
+                if tunnel.remote_cleanup_host:
+                    lines.append("        remote_cleanup_host: " + render_scalar(tunnel.remote_cleanup_host))
+                if tunnel.remote_cleanup_port is not None:
+                    lines.append(f"        remote_cleanup_port: {tunnel.remote_cleanup_port}")
         else:
             lines[-1] = "    tunnels: []"
     return "\n".join(lines) + "\n"
@@ -287,6 +296,15 @@ def optional_int(data: dict, key: str, default: int) -> int:
         return default
     if not isinstance(value, int):
         raise InventoryError(f"Field {key} must be an integer.")
+    return value
+
+
+def nullable_int(data: dict, key: str) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int):
+        raise InventoryError(f"Field {key} must be an integer or null.")
     return value
 
 

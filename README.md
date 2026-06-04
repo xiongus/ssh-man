@@ -190,6 +190,64 @@ default_tunnels:
   - "*"
 ```
 
+For a tunnel whose SSH endpoint is only reachable through a jump host, model the
+endpoint as its own host and set `proxy_jump` when your local SSH identity can
+authenticate to that endpoint. `ProxyJump` only uses the jump host for network
+transport.
+
+```yaml
+hosts:
+  - alias: work-jump
+    host: 192.168.78.36
+    user: root
+    port: 22
+    proxy_jump:
+    tunnels: []
+
+  - alias: s3-gateway
+    host: 10.220.111.194
+    user: root
+    port: 10922
+    proxy_jump: work-jump
+    tunnels:
+      - alias: t-s3-es
+        local_port: 19208
+        target_host: 21.0.36.2
+        target_port: 9208
+        bind_address: 127.0.0.1
+        note: S3 Elasticsearch
+```
+
+If the endpoint only accepts keys that live on the jump host, keep the nested SSH
+command explicit and add remote cleanup metadata. `sshm t --stop <alias>` will
+kill the local SSH listener and the managed remote SSH listener; it refuses to
+kill non-SSH listeners.
+
+```yaml
+hosts:
+  - alias: work-jump
+    host: 192.168.78.36
+    user: root
+    port: 22
+    tunnels:
+      - alias: t-s3-es
+        local_port: 19208
+        target_host: 21.0.36.2
+        target_port: 9208
+        bind_address: 127.0.0.1
+        note: S3 Elasticsearch
+        command: ssh -f -o ExitOnForwardFailure=yes -L 127.0.0.1:19208:127.0.0.1:29208 work-jump ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:29208:21.0.36.2:9208 -p 10922 10.220.111.194
+        remote_cleanup_host: work-jump
+        remote_cleanup_port: 29208
+```
+
+Start or stop every tunnel under a host:
+
+```bash
+sshm t work-jump --all
+sshm t work-jump --all --stop
+```
+
 That means "start every tunnel under this host" and only applies when you explicitly write `*`.
 
 Notes:

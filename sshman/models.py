@@ -49,3 +49,6 @@ class InventoryTunnel:
     target_port: int
     bind_address: str = "127.0.0.1"
     note: str | None = None
+    command: str | None = None
+    remote_cleanup_host: str | None = None
+    remote_cleanup_port: int | None = None
